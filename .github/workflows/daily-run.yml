@@ -22,13 +22,12 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          # 기존에 설치하던 패키지에 webdriver-manager 추가
           pip install gspread \
-                      oauth2client \
-                      selenium \
-                      openai \
-                      python-dateutil \
-                      webdriver-manager
+                    oauth2client \
+                    selenium \
+                    webdriver-manager \
+                    openai \
+                    python-dateutil
 
       - name: Run script
         env:
