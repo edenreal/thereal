@@ -83,7 +83,10 @@ for row in rss_sheet.get_all_records():
     try:
         pd = parse(str(row["포스팅 날짜"])).date()
         if pd in (today.date(), yesterday.date()) and row["포스팅 링크"] not in existing_urls:
-            new_posts.append({"업체명":row.get("업체명",""), "URL":row["포스팅 링크"]})
+            new_posts.append({
+                "업체명": row.get("업체명", ""),
+                "URL": row["포스팅 링크"]
+            })
     except:
         continue
 
@@ -94,6 +97,7 @@ options = webdriver.ChromeOptions()
 options.add_argument("--headless")
 options.add_argument("--no-sandbox")
 options.add_argument("--disable-dev-shm-usage")
+# (GitHub Actions 환경에서는 chromium-browser/chromedriver가 사전설치되어 있어야 합니다)
 
 driver = webdriver.Chrome(options=options)
 
@@ -105,13 +109,14 @@ for idx, post in enumerate(new_posts, start=1):
         time.sleep(2)
         driver.switch_to.frame("mainFrame")
         body = driver.find_element(By.CLASS_NAME, "se-main-container").text
-        info = extract_listing_info(body)
 
+        info = extract_listing_info(body)
         row = [post["업체명"], post["URL"]]
         for col in header[2:-1]:
             row.append(info.get(col, ""))
         row.append(today.strftime("%Y-%m-%d"))
         result_sheet.append_row(row)
+
         print("✅ 저장 완료")
     except NoSuchElementException:
         print("❌ 본문 프레임/클래스 못찾음")
