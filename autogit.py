@@ -7,14 +7,13 @@ import openai
 from datetime import datetime, timedelta
 from dateutil.parser import parse
 from oauth2client.service_account import ServiceAccountCredentials
-
 from selenium import webdriver
-from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
 from selenium.common.exceptions import NoSuchElementException
 
-# webdriver_manager 로 ChromeDriver 설치/관리
+# webdriver_manager 추가 import
 from webdriver_manager.chrome import ChromeDriverManager
+from selenium.webdriver.chrome.service import Service
 
 # ✅ OpenAI API 키 (환경변수)
 openai.api_key = os.environ["OPENAI_API_KEY"]
@@ -28,6 +27,7 @@ google_creds = json.loads(creds_json_str)
 # ✅ GPT 정보 추출 함수
 def extract_listing_info(text):
     try:
+        # 역슬래시·유니코드 이스케이프 처리
         text = text.encode("unicode_escape").decode("utf-8")
     except Exception as e:
         print(f"⚠️ 전처리 오류: {e}")
@@ -49,6 +49,7 @@ def extract_listing_info(text):
         "- 관리비\n\n"
         f"본문:\n{text}"
     )
+
     try:
         resp = openai.ChatCompletion.create(
             model="gpt-3.5-turbo",
@@ -79,33 +80,29 @@ if not result_sheet.get_all_values():
     result_sheet.append_row(header)
 existing_urls = [r[1] for r in result_sheet.get_all_values()[1:]]
 
-# ✅ 오늘·어제 필터링
+# ✅ 오늘·어제 포스팅 필터
 today, yesterday = datetime.now(), datetime.now() - timedelta(days=1)
 new_posts = []
 for row in rss_sheet.get_all_records():
     try:
         pd = parse(str(row["포스팅 날짜"])).date()
         if pd in (today.date(), yesterday.date()) and row["포스팅 링크"] not in existing_urls:
-            new_posts.append({
-                "업체명": row.get("업체명",""),
-                "URL": row["포스팅 링크"]
-            })
+            new_posts.append({"업체명":row.get("업체명",""), "URL":row["포스팅 링크"]})
     except:
         continue
 
 print(f"🔍 수집 대상 포스팅 수: {len(new_posts)}")
 
-# ✅ Selenium 옵션 & Service 설정
+# ✅ 크롬 옵션 및 Service (webdriver_manager 사용)
 options = webdriver.ChromeOptions()
 options.add_argument("--headless")
 options.add_argument("--no-sandbox")
 options.add_argument("--disable-dev-shm-usage")
 
-# ChromeDriverManager 로 자동 다운로드된 드라이버 사용
 service = Service(ChromeDriverManager().install())
-driver  = webdriver.Chrome(service=service, options=options)
+driver = webdriver.Chrome(service=service, options=options)
 
-# ✅ 크롤링 → GPT → 시트 저장
+# ✅ 크롤링 + GPT + 시트 저장
 for idx, post in enumerate(new_posts, start=1):
     print(f"[{idx}] 크롤링: {post['URL']}")
     try:
@@ -113,14 +110,12 @@ for idx, post in enumerate(new_posts, start=1):
         time.sleep(2)
         driver.switch_to.frame("mainFrame")
         body = driver.find_element(By.CLASS_NAME, "se-main-container").text
-
         info = extract_listing_info(body)
-        row  = [post["업체명"], post["URL"]]
-        for col in header[2:-1]:
-            row.append(info.get(col, ""))
-        row.append(today.strftime("%Y-%m-%d"))
-        result_sheet.append_row(row)
 
+        row = [post["업체명"], post["URL"]] + \
+              [info.get(col, "") for col in header[2:-1]] + \
+              [today.strftime("%Y-%m-%d")]
+        result_sheet.append_row(row)
         print("✅ 저장 완료")
     except NoSuchElementException:
         print("❌ 본문 프레임/클래스 못찾음")
