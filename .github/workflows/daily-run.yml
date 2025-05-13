@@ -1,9 +1,9 @@
+# .github/workflows/daily-run.yml
 name: Run every day
 
 on:
   schedule:
-    # 매일 오전 0시(UTC) = 오전 9시(KST)
-    - cron: '0 0 * * *'
+    - cron: '0 0 * * *'    # 매일 자정에 한 번 (UTC 기준)
   workflow_dispatch:
 
 jobs:
@@ -14,28 +14,23 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v3
 
-      - name: Set up Python 3.10
+      - name: Set up Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.10'
 
-      - name: Install system deps (Chromium & driver)
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y chromium-browser chromium-chromedriver
-
-      - name: Install Python packages
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install \
-            gspread \
-            oauth2client \
-            selenium \
-            openai \
-            python-dateutil \
-            webdriver-manager
+          # 기존에 설치하던 패키지에 webdriver-manager 추가
+          pip install gspread \
+                      oauth2client \
+                      selenium \
+                      openai \
+                      python-dateutil \
+                      webdriver-manager
 
-      - name: Run autogit
+      - name: Run script
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           GCP_CREDENTIALS_JSON: ${{ secrets.GCP_CREDENTIALS_JSON }}
