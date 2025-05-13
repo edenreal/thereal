@@ -26,7 +26,7 @@ jobs:
                     oauth2client \
                     selenium \
                     webdriver-manager \
-                    openai \
+                    openai==0.27.0 \
                     python-dateutil
 
       - name: Run script
