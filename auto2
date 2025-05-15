@@ -1,0 +1,115 @@
+import os, json, time, gspread
+import openai
+from datetime import datetime, timedelta
+from dateutil.parser import parse
+from oauth2client.service_account import ServiceAccountCredentials
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.common.exceptions import NoSuchElementException
+
+# 0) 환경변수 세팅
+openai.api_key = os.environ["OPENAI_API_KEY"]
+creds_json = os.getenv("GCP_CREDENTIALS_JSON")
+if not creds_json:
+    raise RuntimeError("GCP_CREDENTIALS_JSON이 없습니다.")
+google_creds = json.loads(creds_json)
+
+# 1) GPT 함수 스펙
+functions = [{
+    "name": "extract_info",
+    "description": "매물 정보를 JSON으로 반환합니다.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "단지명":             {"type":"string"},
+            "소재지":             {"type":"string"},
+            "중개대상물종류":      {"type":"string"},
+            "거래형태":           {"type":"string"},
+            "해당층/총층":         {"type":"string"},
+            "공급/전용면적":       {"type":"string"},
+            "룸/욕실":            {"type":"string"},
+            "주차대수":           {"type":"string"},
+            "향":                 {"type":"string"},
+            "입주가능일":         {"type":"string"},
+            "사용승인일":         {"type":"string"},
+            "관리비":             {"type":"string"}
+        },
+        "required": ["단지명","소재지","중개대상물종류","거래형태"]
+    }
+}]
+
+def extract_listing_info(text):
+    system_msg = (
+        "당신은 부동산 매물 정보를 추출하는 전문가입니다. "
+        "아래 함수 스키마에 맞춰 JSON을 반환하세요."
+    )
+    user_msg = f"본문:\n{text}"
+
+    resp = openai.ChatCompletion.create(
+        model="gpt-3.5-turbo-0613",
+        messages=[
+            {"role":"system","content":system_msg},
+            {"role":"user","content":user_msg}
+        ],
+        functions=functions,
+        function_call={"name":"extract_info"},
+        temperature=0
+    )
+    args = resp.choices[0].message["function_call"]["arguments"]
+    info = json.loads(args)
+
+    # 누락 필드 디폴트
+    for key in functions[0]["parameters"]["properties"].keys():
+        info.setdefault(key, "")
+    return info
+
+# 2) 구글 시트 인증
+scope = ["https://spreadsheets.google.com/feeds","https://www.googleapis.com/auth/drive"]
+creds = ServiceAccountCredentials.from_json_keyfile_dict(google_creds, scope)
+gc = gspread.authorize(creds)
+rss_sheet    = gc.open_by_key("10lLkfTb_uf68cU2w2OAcXXN6QBiuXGnayK3nf1247tY").sheet1
+result_sheet = gc.open_by_key("1onQ8R2S-RaH57pel-s-cx1R1RKlagIqRpL8fIoyTnqk").sheet1
+
+# 3) 헤더 준비
+header = ["업체명","URL"] + list(functions[0]["parameters"]["properties"].keys()) + ["수집일자"]
+if not result_sheet.get_all_values():
+    result_sheet.append_row(header)
+existing = [r[1] for r in result_sheet.get_all_values()[1:]]
+
+# 4) 오늘·어제 필터링
+today, yesterday = datetime.now(), datetime.now() - timedelta(days=1)
+posts = []
+for row in rss_sheet.get_all_records():
+    try:
+        pd = parse(str(row["포스팅 날짜"])).date()
+        if pd in (today.date(), yesterday.date()) and row["포스팅 링크"] not in existing:
+            posts.append({"업체명":row.get("업체명",""), "URL":row["포스팅 링크"]})
+    except:
+        continue
+
+# 5) 크롬 드라이버(Headless)
+options = webdriver.ChromeOptions()
+options.add_argument("--headless")
+options.add_argument("--no-sandbox")
+options.add_argument("--disable-dev-shm-usage")
+driver = webdriver.Chrome(options=options)
+
+# 6) 크롤링 → GPT → 시트 기록
+for idx, post in enumerate(posts, start=1):
+    print(f"[{idx}] {post['URL']}")
+    try:
+        driver.get(post["URL"])
+        time.sleep(2)
+        driver.switch_to.frame("mainFrame")
+        body = driver.find_element(By.CLASS_NAME, "se-main-container").text
+
+        info = extract_listing_info(body)
+        row = [post["업체명"], post["URL"]] + [info[k] for k in functions[0]["parameters"]["properties"].keys()] + [today.strftime("%Y-%m-%d")]
+        result_sheet.append_row(row)
+        print("✅ 저장")
+    except NoSuchElementException:
+        print("❌ 본문 미발견")
+    except Exception as e:
+        print("⚠️ 오류:", e)
+
+driver.quit()
