@@ -8,7 +8,7 @@ from dateutil.parser import parse
 from oauth2client.service_account import ServiceAccountCredentials
 
 import gspread
-import openai
+from openai import OpenAI
 
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
@@ -17,7 +17,8 @@ from selenium.common.exceptions import NoSuchElementException
 from webdriver_manager.chrome import ChromeDriverManager
 
 # ✅ 환경변수에서 OpenAI 키와 GCP 서비스 계정 JSON 불러오기
-openai.api_key = os.environ["OPENAI_API_KEY"]
+client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+
 creds_json_str = os.getenv("GCP_CREDENTIALS_JSON")
 if not creds_json_str:
     raise Exception("❌ GCP_CREDENTIALS_JSON 환경변수가 없습니다!")
@@ -52,12 +53,12 @@ def _call_gpt_and_parse(text: str) -> dict:
 반드시 JSON 형식으로, 키와 순서를 지켜줘. 본문:
 {text}
 """
-    resp = openai.ChatCompletion.create(
+    resp = client.chat.completions.create(
         model="gpt-3.5-turbo",
         messages=[{"role": "user", "content": prompt}],
         temperature=0.2,
     )
-    return json.loads(resp.choices[0].message["content"])
+    return json.loads(resp.choices[0].message.content)
 
 # ✅ 본문에서 Regex로 보정 후 GPT 결과에 덮어쓰기
 def extract_listing_info(text: str) -> dict:
