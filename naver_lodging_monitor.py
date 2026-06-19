@@ -35,7 +35,7 @@ from openai import OpenAI
 SHEET_KEY = "1nQuvBD99FafPYnIKDyvSugNnDZhUbrkbX7hoFDWOiCY"
 BLOG_TAB = "블로그목록"
 CARD_TAB = "매물카드"
-CARD_HEADER = ["감지일", "블로그", "시도", "시군구", "읍면동", "종류", "형태",
+CARD_HEADER = ["감지일", "게시일", "블로그", "시도", "시군구", "읍면동", "종류", "형태",
                "거래금액", "매출", "객실수", "제목", "링크", "상태"]
 
 RECENT_DAYS = 14       # 이 기간 안에 올라온 새 글만 (첫 실행 폭주/놓침 방지)
@@ -90,9 +90,9 @@ def gpt_extract(oai, title, body):
     return json.loads(resp.choices[0].message.content)
 
 
-def build_row(today, bid, info, title, link, status=""):
+def build_row(today, posted, bid, info, title, link, status=""):
     return [
-        today, bid,
+        today, posted, bid,
         info.get("시도", ""), info.get("시군구", ""), info.get("읍면동", ""),
         info.get("종류", ""), info.get("형태", ""),
         info.get("거래금액", ""), info.get("매출", ""), info.get("객실수", ""),
@@ -138,6 +138,15 @@ def recent_ok(entry, days):
         return True
     dt = datetime.fromtimestamp(calendar.timegm(p), tz=timezone.utc)
     return (datetime.now(timezone.utc) - dt) <= timedelta(days=days)
+
+
+def post_datetime(entry):
+    """글이 실제로 올라온 시각을 한국시간 분 단위 문자열로. (없으면 빈칸)"""
+    p = entry.get("published_parsed") or entry.get("updated_parsed")
+    if not p:
+        return ""
+    dt = datetime.fromtimestamp(calendar.timegm(p), tz=timezone.utc).astimezone(KST)
+    return dt.strftime("%Y-%m-%d %H:%M")
 
 
 def fetch_feed(bid):
@@ -262,6 +271,7 @@ def main():
             seen.add(link)
 
             title = (entry.get("title") or "").strip()
+            posted = post_datetime(entry)
             bid_, logno_ = parse_link(link)
             body = fetch_post_body(bid_, logno_) or entry_body(entry)  # 본문 우선, 실패 시 RSS 일부
             time.sleep(0.7)   # 본문 접속 간격 (차단 회피)
@@ -270,7 +280,7 @@ def main():
                 info = gpt_extract(oai, title, body)
             except Exception as e:
                 n_gpt_fail += 1
-                new_rows.append(build_row(today, bid, {}, title, link, "확인필요(GPT실패)"))
+                new_rows.append(build_row(today, posted, bid, {}, title, link, "확인필요(GPT실패)"))
                 added += 1
                 continue
 
@@ -278,7 +288,7 @@ def main():
                 n_skip += 1
                 continue
 
-            new_rows.append(build_row(today, bid, info, title, link, ""))
+            new_rows.append(build_row(today, posted, bid, info, title, link, ""))
             added += 1
 
         if added:
