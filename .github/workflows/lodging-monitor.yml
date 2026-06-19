@@ -2,7 +2,8 @@
 name: 숙박 매물 감시
 on:
   schedule:
-    - cron: '0 22 * * *'    # UTC 22:00 = 한국시간 오전 7시 (아침에 카드 확인)
+    - cron: '0 22 * * *'    # UTC 22:00 = 한국 오전 7시 (밤사이 올라온 글)
+    - cron: '0 10 * * *'    # UTC 10:00 = 한국 오후 7시 (낮에 올라온 글)
   workflow_dispatch:          # 수동 실행 버튼
 jobs:
   monitor:
@@ -17,8 +18,9 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install gspread google-auth requests feedparser
+          pip install gspread google-auth requests feedparser openai
       - name: Run monitor
         env:
           GCP_CREDENTIALS_JSON: ${{ secrets.GCP_CREDENTIALS_JSON }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: python naver_lodging_monitor.py
