@@ -27,6 +27,7 @@ from collections import defaultdict
 
 import requests
 import gspread
+from gspread.utils import rowcol_to_a1
 from openai import OpenAI
 
 # ════════════════════════════════ 설정 ════════════════════════════════
@@ -142,7 +143,9 @@ def existing_candidates(cand_ws):
 
 
 def promote_approved(cand_ws, blog_ws, blog_ids):
-    """블로그후보에서 승인(O)된 행을 블로그목록으로 옮긴다."""
+    """블로그후보에서 승인(O)된 행을 블로그목록으로 옮긴다.
+    쓰기를 한 번에 모아서 처리해 구글 분당 한도(429)를 피한다.
+    이전에 '등록완료'로 표시됐지만 감시목록엔 빠진 행도 복구한다."""
     vals = cand_ws.get_all_values()
     if len(vals) < 2:
         return []
@@ -150,17 +153,28 @@ def promote_approved(cand_ws, blog_ws, blog_ids):
     if "승인" not in header or "블로그ID" not in header:
         return []
     ai, bi = header.index("승인"), header.index("블로그ID")
-    promoted = []
+
+    promoted, mark_rows = [], []
     for i, row in enumerate(vals[1:], start=2):
         mark = row[ai].strip().upper() if len(row) > ai else ""
-        if mark in APPROVE_MARKS:
-            bid = row[bi].strip() if len(row) > bi else ""
-            if bid and bid not in blog_ids:
-                promoted.append(bid)
-                blog_ids.add(bid)
-                cand_ws.update_cell(i, ai + 1, "등록완료")
+        bid = row[bi].strip() if len(row) > bi else ""
+        is_approved = mark in APPROVE_MARKS      # O, Y 등 (새로 승인한 것)
+        is_done = (mark == "등록완료")            # 이미 처리됐다고 표시된 것
+        if (is_approved or is_done) and bid and bid not in blog_ids:
+            promoted.append(bid)
+            blog_ids.add(bid)
+            if is_approved:                      # O였던 것만 '등록완료'로 마킹
+                mark_rows.append(i)
+
     if promoted:
+        # (1) 감시목록 추가 — 한 번의 호출
         blog_ws.append_rows([[b, "발굴기승인"] for b in promoted], value_input_option="RAW")
+        # (2) 승인 칸 '등록완료' 표시 — 한 번의 batch 호출 (셀마다 따로 X)
+        if mark_rows:
+            col = re.sub(r"\d", "", rowcol_to_a1(1, ai + 1))
+            cand_ws.batch_update(
+                [{"range": f"{col}{r}", "values": [["등록완료"]]} for r in mark_rows]
+            )
     return promoted
 
 
