@@ -1,0 +1,27 @@
+# .github/workflows/blog-finder.yml
+name: 경쟁 블로그 발굴
+on:
+  schedule:
+    - cron: '0 22 * * 1'    # UTC 22:00 월요일 = 한국 화요일 오전 7시 (주 1회)
+  workflow_dispatch:
+jobs:
+  finder:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install gspread google-auth requests openai
+      - name: Run finder
+        env:
+          GCP_CREDENTIALS_JSON: ${{ secrets.GCP_CREDENTIALS_JSON }}
+          NAVER_CLIENT_ID: ${{ secrets.NAVER_CLIENT_ID }}
+          NAVER_CLIENT_SECRET: ${{ secrets.NAVER_CLIENT_SECRET }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: python naver_blog_finder.py
