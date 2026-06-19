@@ -35,7 +35,7 @@ from openai import OpenAI
 SHEET_KEY = "1nQuvBD99FafPYnIKDyvSugNnDZhUbrkbX7hoFDWOiCY"
 BLOG_TAB = "블로그목록"
 CARD_TAB = "매물카드"
-CARD_HEADER = ["감지일", "블로그", "시도", "시군구", "종류", "형태",
+CARD_HEADER = ["감지일", "블로그", "시도", "시군구", "읍면동", "종류", "형태",
                "거래금액", "매출", "객실수", "제목", "링크", "상태"]
 
 RECENT_DAYS = 14       # 이 기간 안에 올라온 새 글만 (첫 실행 폭주/놓침 방지)
@@ -58,8 +58,10 @@ EXTRACT_PROMPT = """다음은 부동산 중개 블로그 글이다. 숙박시설
 규칙:
 - 글에 실제로 있는 내용만 쓴다. 절대 지어내지 않는다. 모르면 빈 문자열 "".
 - "거래금액"은 보증금·월세·매매가 같은 실제 거래 가격이다. "매출"은 월매출·순수익이다. 이 둘을 절대 섞지 않는다.
+- "거래금액"과 "매출"은 글에 적힌 표기 그대로 쓴다(예: "보증금 3억", "월세 3500만", "매매가 25억", "월매출 4000만", "순수익 800만"). 절대 원 단위 숫자로 풀어쓰지 않는다(예: 40000000 같은 형태 금지).
 - 맛집·후기·정보·상식·일상 글이면 "매물여부"를 "비매물"로 한다.
 - "시도"는 광역시/도 정식명(서울특별시, 경기도, 부산광역시 등). 동·역 이름으로 분명히 알 수 있으면 채운다(예: 강동역→서울특별시, 수원→경기도). 애매하면 "".
+- "시군구"는 시/군/구(예: 수원시, 강동구). "읍면동"은 동·읍·면·리(예: 구운동, 초량동, 부강면). 없으면 "".
 - "형태"는 매매면 "매매", 임대면 "임대", 둘 다면 "매매/임대".
 - "객실수"는 숫자+실 형식(예: 54실). 없으면 "".
 
@@ -67,7 +69,7 @@ EXTRACT_PROMPT = """다음은 부동산 중개 블로그 글이다. 숙박시설
 본문: {body}
 
 아래 JSON 형식으로만 답하라:
-{{"매물여부":"매물 또는 비매물","시도":"","시군구":"","종류":"","형태":"","거래금액":"","매출":"","객실수":""}}"""
+{{"매물여부":"매물 또는 비매물","시도":"","시군구":"","읍면동":"","종류":"","형태":"","거래금액":"","매출":"","객실수":""}}"""
 
 
 def get_openai():
@@ -91,7 +93,7 @@ def gpt_extract(oai, title, body):
 def build_row(today, bid, info, title, link, status=""):
     return [
         today, bid,
-        info.get("시도", ""), info.get("시군구", ""),
+        info.get("시도", ""), info.get("시군구", ""), info.get("읍면동", ""),
         info.get("종류", ""), info.get("형태", ""),
         info.get("거래금액", ""), info.get("매출", ""), info.get("객실수", ""),
         title, link, status,
@@ -142,6 +144,31 @@ def fetch_feed(bid):
     r = requests.get(RSS_TMPL.format(bid), headers=UA, timeout=20)
     r.raise_for_status()
     return feedparser.parse(r.content)
+
+
+def parse_link(url):
+    """canon 링크에서 블로그ID와 글번호를 뽑는다."""
+    b = re.search(r"blog\.naver\.com/([A-Za-z0-9_\-]+)", url or "")
+    n = re.search(r"(?:logNo=|/)(\d{8,})", url or "")
+    return (b.group(1) if b else ""), (n.group(1) if n else "")
+
+
+def fetch_post_body(bid, logno):
+    """모바일 블로그 페이지에서 본문 텍스트를 가져온다. 실패하면 빈 문자열.
+    이미지 표에 박힌 정보는 텍스트가 없으므로 못 가져온다(그건 비전 영역)."""
+    if not (bid and logno):
+        return ""
+    url = f"https://m.blog.naver.com/{bid}/{logno}"
+    try:
+        r = requests.get(url, headers=UA, timeout=15)
+        r.raise_for_status()
+        html = r.text
+        i = html.find("se-main-container")   # 본문 컨테이너 시작
+        if i != -1:
+            html = html[i:i + 20000]
+        return strip_html(html)[:3000]
+    except Exception:
+        return ""
 
 
 # ════════════════════════════════ 시트 ════════════════════════════════
@@ -235,7 +262,9 @@ def main():
             seen.add(link)
 
             title = (entry.get("title") or "").strip()
-            body = entry_body(entry)
+            bid_, logno_ = parse_link(link)
+            body = fetch_post_body(bid_, logno_) or entry_body(entry)  # 본문 우선, 실패 시 RSS 일부
+            time.sleep(0.7)   # 본문 접속 간격 (차단 회피)
 
             try:
                 info = gpt_extract(oai, title, body)
