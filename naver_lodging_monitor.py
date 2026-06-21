@@ -58,6 +58,20 @@ SEED_BLOGS = [
     "korea-7942-", "7979sic", "sojwa07", "jjsskk0815", "ska6565",
 ]
 
+# 비숙박 전문 블로그 — 감시에서 영구 제외(발굴기가 다시 편입해도 무시).
+# 여기에 블로그ID만 추가하면 그 블로그는 다시 안 긁는다.
+BLOCKLIST = {
+    "stewzinnia59",   # 부동산 분양/상담
+    "ksanchoi",       # 경매
+    "auctionrun3988", # 경매
+    "sbjjjang",       # 수익형 상가
+    "kj-4848",        # 고시원
+    "jijonbpbp",      # 리조트 회원권
+}
+
+EXTRACT_BODY_CHARS = 800   # GPT에 보낼 본문 길이(글자). 매물 정보는 앞부분에 몰려 있어 800이면 충분.
+GPT_RETRIES = 3            # rate limit/timeout 시 재시도 횟수(1→2→4초 백오프)
+
 # ─────────────────── 종류 필터 (고시원·거주형·비숙박 제거) ───────────────────
 # 숙박 키워드: 종류에 이게 들어가면 '무조건 통과'.
 #   (민박주택·한옥스테이·관광용 호텔처럼 거주/비숙박 단어가 섞여도 숙박이면 구제)
@@ -116,14 +130,22 @@ def get_openai():
 
 
 def gpt_extract(oai, title, body):
-    content = EXTRACT_PROMPT.format(title=title, body=(body or "")[:1500])
-    resp = oai.chat.completions.create(
-        model=MODEL,
-        messages=[{"role": "user", "content": content}],
-        temperature=0,
-        response_format={"type": "json_object"},
-    )
-    return json.loads(resp.choices[0].message.content)
+    content = EXTRACT_PROMPT.format(title=title, body=(body or "")[:EXTRACT_BODY_CHARS])
+    last_err = None
+    for attempt in range(GPT_RETRIES):
+        try:
+            resp = oai.chat.completions.create(
+                model=MODEL,
+                messages=[{"role": "user", "content": content}],
+                temperature=0,
+                response_format={"type": "json_object"},
+            )
+            return json.loads(resp.choices[0].message.content)
+        except Exception as e:
+            last_err = e
+            if attempt < GPT_RETRIES - 1:
+                time.sleep(2 ** attempt)   # 1초 → 2초 → 4초 대기 후 재시도
+    raise last_err   # 끝까지 실패하면 호출부에서 '확인필요(GPT실패)'로 기록
 
 
 def build_row(today, posted, bid, info, title, link, status="", dup=""):
@@ -237,6 +259,8 @@ def load_blogs(ss):
         ids = list(SEED_BLOGS)
     seen, out = set(), []
     for b in ids:
+        if b in BLOCKLIST:        # 비숙박 전문 블로그는 건너뛴다
+            continue
         if b not in seen:
             seen.add(b)
             out.append(b)
@@ -339,7 +363,7 @@ def main():
     new_rows = []
     n_rss_fail = n_skip = n_excl = n_gpt_fail = 0
 
-    print(f"감시 시작 — 블로그 {len(blogs)}개, 기존 {len(seen)}건 (모델 {MODEL})")
+    print(f"감시 시작 — 블로그 {len(blogs)}개(비숙박 {len(BLOCKLIST)}개 제외), 기존 {len(seen)}건 (모델 {MODEL})")
     for bid in blogs:
         try:
             feed = fetch_feed(bid)
