@@ -1,0 +1,26 @@
+name: 매물 재처리 (1회용 수동)
+
+# 자동 실행 없음. Actions 탭에서 'Run workflow' 버튼으로만 돈다.
+on:
+  workflow_dispatch:
+
+jobs:
+  recheck:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 코드 체크아웃
+        uses: actions/checkout@v4
+
+      - name: 파이썬 설치
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 라이브러리 설치
+        run: pip install gspread google-auth requests openai
+
+      - name: 재처리 실행
+        env:
+          GCP_CREDENTIALS_JSON: ${{ secrets.GCP_CREDENTIALS_JSON }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: python naver_lodging_recheck.py
