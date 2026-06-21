@@ -1,21 +1,20 @@
 # -*- coding: utf-8 -*-
 """
-경쟁 블로그 발굴기
+경쟁 블로그 발굴기 — 자동편입 버전
 ─────────────────────────────────────────────────────────
 하는 일 (주 1회):
-  1) '블로그후보' 탭에서 네가 승인(O)한 블로그를 → '블로그목록'으로 옮긴다 (감시 시작)
-  2) 네이버 검색 API로 숙박 매물 키워드를 검색
-  3) 결과에서 블로그ID를 모아, 이미 감시 중이거나 이미 후보인 건 빼고
-  4) 숙박 키워드에 여러 번 걸린 순서로 '블로그후보' 탭에 올린다
-  5) 너는 후보를 보고 '승인' 칸에 O만 치면 된다 (다음 실행 때 감시 시작)
+  1) 네이버 검색 API로 숙박 매물 키워드를 검색
+  2) 결과에서 블로그ID를 모아, 이미 감시 중·이미 후보·BLOCKLIST인 건 빼고
+  3) 숙박 키워드에 여러 번 걸린 블로그를 GPT로 '숙박/비숙박' 판정
+  4) [변경] GPT가 '숙박'이라고 하면 → 사람 승인 없이 바로 '블로그목록'에 편입(자동)
+            '비숙박'·'확인필요'는 → '블로그후보' 탭에 기록만 (편입 안 함)
 
-핵심: 발굴기는 후보까지만 올린다. 감시 명단 등록은 네 승인(O)을 거친다.
-       (검색은 인테리어·대출 업체 블로그 같은 쓰레기도 물어오기 때문)
+  ※ 그래서 너는 발굴기를 신경 쓸 필요가 없다. 주 1회 알아서 알짜를 주워 담는다.
+    비숙박이 잘못 편입된 게 보이면, 감시기 BLOCKLIST에 그 블로그ID만 추가하면 끝.
+  ※ 후보 탭에서 직접 '승인' 칸에 O를 쳐도 여전히 편입된다(수동 보강용).
 
 필요 환경변수(GitHub Secret):
-  GCP_CREDENTIALS_JSON
-  NAVER_CLIENT_ID
-  NAVER_CLIENT_SECRET
+  GCP_CREDENTIALS_JSON / NAVER_CLIENT_ID / NAVER_CLIENT_SECRET / OPENAI_API_KEY
 """
 import os
 import re
@@ -45,9 +44,15 @@ SEARCH_KEYWORDS = [
     "모텔 매물", "여관 매매",
 ]
 DISPLAY = 100      # 키워드당 가져올 검색 결과 수 (최대 100)
-MIN_HITS = 2       # 이 횟수 이상 검색에 걸린 블로그만 후보로 (노이즈 제거). 더 넓게 보려면 1로.
-MODEL = "gpt-4o-mini"   # 후보 판정용. 접근 안 되면 "gpt-3.5-turbo"로.
+MIN_HITS = 2       # 이 횟수 이상 검색에 걸린 블로그만 후보로 (노이즈 제거)
+MODEL = "gpt-4o-mini"
 APPROVE_MARKS = {"O", "Y", "ㅇ", "승인", "예"}
+
+# 비숙박 전문 블로그 — 후보로도 올리지 않는다(감시기 BLOCKLIST와 동일하게 유지).
+BLOCKLIST = {
+    "stewzinnia59", "ksanchoi", "auctionrun3988", "sbjjjang", "kj-4848", "jijonbpbp",
+    "kkanglive", "moneyschool300",
+}
 
 
 # ════════════════════════════════ 유틸 ════════════════════════════════
@@ -78,10 +83,21 @@ def search_blog(kw, cid, sec, display=DISPLAY):
 
 
 # ════════════════════════════════ GPT 판정 ════════════════════════════════
-JUDGE_PROMPT = """다음은 네이버 블로그의 이름과 최근 글 제목 몇 개다. 이 블로그가 '숙박시설(모텔·호텔·호스텔·고시원·여관 등) 매물을 중개·소개하는 블로그'인지 판단하라.
+JUDGE_PROMPT = """다음은 네이버 블로그의 이름과 최근 글 제목 몇 개다. 이 블로그가 '숙박시설(모텔·호텔·호스텔·여관·펜션·게스트하우스 등) 매물을 중개·소개하는 블로그'인지 판단하라.
 
-- 모텔·호텔 등의 매매·임대 매물을 올리는 공인중개사·중개 블로그면 "숙박".
-- 인테리어·시공·리모델링 업체, 대출·금융, 청소·방역, 숙박 이용후기·여행기, 기타 업종이면 "비숙박".
+"숙박"으로 판정:
+- 모텔·호텔·호스텔·여관·펜션·게스트하우스 등의 매매·임대 매물을 실제로 올리는 공인중개사·중개 블로그.
+
+"비숙박"으로 판정 (아래는 전부 비숙박):
+- 인테리어·시공·리모델링 업체, 대출·금융, 청소·방역
+- 경매 물건을 나열하는 경매 전문 블로그(제목에 "타경"·사건번호 위주)
+- 상가·빌딩·공장·토지·사무실 등 숙박이 아닌 부동산 위주
+- 투자일기·재테크·부동산 일상/일기 블로그
+- 강의·원데이클래스·세미나·교육·컨설팅 홍보 블로그
+- 회원권·콘도·분양·분양상담
+- 숙박 이용후기·여행기·맛집·기타 업종
+
+판단이 애매하면 "비숙박"으로 한다. (이 판정으로 자동 편입되므로 보수적으로 판단하라.)
 
 블로그명: {name}
 최근 글 제목:
@@ -126,7 +142,6 @@ def get_or_create(ss, title, header):
 
 
 def current_blog_ids(ss):
-    """감시 명단(블로그목록)의 ID 집합과 워크시트를 돌려준다."""
     try:
         ws = ss.worksheet(BLOG_TAB)
     except gspread.WorksheetNotFound:
@@ -143,9 +158,8 @@ def existing_candidates(cand_ws):
 
 
 def promote_approved(cand_ws, blog_ws, blog_ids):
-    """블로그후보에서 승인(O)된 행을 블로그목록으로 옮긴다.
-    쓰기를 한 번에 모아서 처리해 구글 분당 한도(429)를 피한다.
-    이전에 '등록완료'로 표시됐지만 감시목록엔 빠진 행도 복구한다."""
+    """블로그후보에서 승인(O)된 행을 블로그목록으로 옮긴다(수동 보강용).
+    자동편입과 별개로, 사람이 직접 O를 친 것도 계속 처리한다."""
     vals = cand_ws.get_all_values()
     if len(vals) < 2:
         return []
@@ -158,18 +172,16 @@ def promote_approved(cand_ws, blog_ws, blog_ids):
     for i, row in enumerate(vals[1:], start=2):
         mark = row[ai].strip().upper() if len(row) > ai else ""
         bid = row[bi].strip() if len(row) > bi else ""
-        is_approved = mark in APPROVE_MARKS      # O, Y 등 (새로 승인한 것)
-        is_done = (mark == "등록완료")            # 이미 처리됐다고 표시된 것
+        is_approved = mark in APPROVE_MARKS
+        is_done = (mark == "등록완료" or mark == "자동편입")
         if (is_approved or is_done) and bid and bid not in blog_ids:
             promoted.append(bid)
             blog_ids.add(bid)
-            if is_approved:                      # O였던 것만 '등록완료'로 마킹
+            if is_approved:
                 mark_rows.append(i)
 
     if promoted:
-        # (1) 감시목록 추가 — 한 번의 호출
-        blog_ws.append_rows([[b, "발굴기승인"] for b in promoted], value_input_option="RAW")
-        # (2) 승인 칸 '등록완료' 표시 — 한 번의 batch 호출 (셀마다 따로 X)
+        blog_ws.append_rows([[b, "후보승인"] for b in promoted], value_input_option="RAW")
         if mark_rows:
             col = re.sub(r"\d", "", rowcol_to_a1(1, ai + 1))
             cand_ws.batch_update(
@@ -188,16 +200,16 @@ def main():
     blog_ids, blog_ws = current_blog_ids(ss)
     cand_ws = get_or_create(ss, CAND_TAB, CAND_HEADER)
 
-    # 1) 승인된 후보 → 감시목록
+    # 1) 사람이 직접 O 친 후보도 편입(수동 보강)
     promoted = promote_approved(cand_ws, blog_ws, blog_ids)
     if promoted:
-        print(f"승인 반영: {len(promoted)}개 감시목록에 추가 — {promoted}")
+        print(f"수동승인 반영: {len(promoted)}개 — {promoted}")
 
-    # 2) 발굴 (이미 감시 중이거나 이미 후보인 건 제외 대상)
-    already = blog_ids | existing_candidates(cand_ws)
+    # 2) 발굴 (감시 중 + 후보 + BLOCKLIST 제외)
+    already = blog_ids | existing_candidates(cand_ws) | BLOCKLIST
     cand = defaultdict(lambda: {"name": "", "hits": 0, "titles": [], "link": ""})
 
-    print(f"발굴 시작 — 키워드 {len(SEARCH_KEYWORDS)}개, 기존(감시+후보) {len(already)}개 제외")
+    print(f"발굴 시작 — 키워드 {len(SEARCH_KEYWORDS)}개, 제외 {len(already)}개(감시+후보+차단 {len(BLOCKLIST)})")
     for kw in SEARCH_KEYWORDS:
         try:
             items = search_blog(kw, cid, sec)
@@ -218,13 +230,13 @@ def main():
         print(f"  '{kw}': 누적 신규후보 {len(cand)}개")
         time.sleep(0.3)
 
-    # 3) MIN_HITS 이상만, GPT로 숙박/비숙박 판정 후 기록
+    # 3) MIN_HITS 이상만 GPT 판정 → '숙박'이면 자동 편입
     today = datetime.now(KST).strftime("%Y-%m-%d")
     survivors = [(b, c) for b, c in sorted(cand.items(), key=lambda x: -x[1]["hits"])
                  if c["hits"] >= MIN_HITS]
     print(f"후보 {len(survivors)}개 GPT 판정 중...")
 
-    rows = []
+    rows, auto = [], []
     n_yes = n_judgefail = 0
     for b, c in survivors:
         try:
@@ -234,18 +246,26 @@ def main():
         except Exception:
             verdict, reason = "확인필요", "GPT판정실패"
             n_judgefail += 1
+
         if verdict == "숙박":
+            auto.append(b)
+            blog_ids.add(b)
+            mark = "자동편입"
             n_yes += 1
+        else:
+            mark = ""    # 비숙박·확인필요는 후보 탭에 기록만(편입 안 함)
         rows.append([today, b, c["name"], c["hits"], " / ".join(c["titles"]),
-                     verdict, reason, c["link"], ""])
+                     verdict, reason, c["link"], mark])
 
     if rows:
         cand_ws.append_rows(rows, value_input_option="RAW")
+    if auto:
+        blog_ws.append_rows([[b, "발굴자동편입"] for b in auto], value_input_option="RAW")
 
     print("─" * 52)
-    print(f"완료 — 새 후보 {len(rows)}개 (GPT '숙박' {n_yes}개 · 판정실패 {n_judgefail}) · 승인반영 {len(promoted)}개")
-    print("→ '블로그후보' 탭에서 GPT판정이 '숙박'인 줄을 보고, 맞으면 '승인' 칸에 O 를 치세요.")
-    print("  ('비숙박' 줄은 평소 무시. GPT가 잘못 거른 게 있나 가끔만 확인하면 됩니다.)")
+    print(f"완료 — 새 후보 {len(rows)}개 · GPT '숙박' {n_yes}개 자동편입 · "
+          f"판정실패 {n_judgefail} · 수동승인 {len(promoted)}")
+    print("→ 비숙박이 잘못 편입된 게 보이면, 감시기와 발굴기의 BLOCKLIST에 그 블로그ID만 추가하세요.")
 
 
 if __name__ == "__main__":
