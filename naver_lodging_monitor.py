@@ -67,6 +67,8 @@ BLOCKLIST = {
     "sbjjjang",       # 수익형 상가
     "kj-4848",        # 고시원
     "jijonbpbp",      # 리조트 회원권
+    "kkanglive",      # 투자일기
+    "moneyschool300", # 숙박업 강의/클래스
 }
 
 EXTRACT_BODY_CHARS = 800   # GPT에 보낼 본문 길이(글자). 매물 정보는 앞부분에 몰려 있어 800이면 충분.
