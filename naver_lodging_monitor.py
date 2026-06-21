@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-숙박 매물 신규 감시기 — GPT 추출 버전
+숙박 매물 신규 감시기 — GPT 추출 버전 (+ 종류필터 + 중복그룹)
 ─────────────────────────────────────────────────────────
 하는 일:
   1) '블로그목록' 탭의 블로그 RSS를 돌면서
@@ -8,7 +8,10 @@
   3) 제목+본문(RSS 일부)을 GPT에게 주고
        시도·시군구·종류·형태·거래금액·매출·객실수를 뽑게 하고
        매물이 아니면(맛집·정보·일상 글) 걸러내고
-  4) '매물카드' 탭에 한 줄씩 쌓는다.
+  4) [신규] 종류가 고시원·거주형·완전비숙박이면 시트에 안 올린다
+  5) '매물카드' 탭에 한 줄씩 쌓는다.
+  6) [신규] 다 쌓은 뒤, 매물카드 전체에서 위치+가격이 같은 도배 매물에
+       중복그룹 번호(D1, D2…)를 매긴다. (행은 안 지우고 표시만)
 
 필요 환경변수(둘 다 GitHub Secret):
   GCP_CREDENTIALS_JSON  : 구글 서비스계정 키(JSON 문자열)
@@ -16,8 +19,8 @@
 
 준비물: 대상 구글시트를 서비스계정 이메일에 '편집자'로 공유해 둘 것.
 
-※ 기존 '매물카드' 탭이 옛 형식이면 자동으로 '매물카드_old'로 백업하고
-  새 형식 탭을 새로 만든다. 기존 데이터는 보존되고 중복도 안 쌓인다.
+※ 기존 '매물카드'가 '중복그룹' 칸이 없던 형식이면, 데이터를 그대로 두고
+  '중복그룹' 칸만 자동으로 추가한다. (백업/재생성 안 함, 중복도 안 쌓임)
 """
 import os
 import re
@@ -25,10 +28,12 @@ import json
 import time
 import calendar
 from datetime import datetime, timezone, timedelta
+from collections import defaultdict
 
 import requests
 import feedparser
 import gspread
+from gspread.utils import rowcol_to_a1
 from openai import OpenAI
 
 # ════════════════════════════════ 설정 ════════════════════════════════
@@ -36,7 +41,8 @@ SHEET_KEY = "1nQuvBD99FafPYnIKDyvSugNnDZhUbrkbX7hoFDWOiCY"
 BLOG_TAB = "블로그목록"
 CARD_TAB = "매물카드"
 CARD_HEADER = ["감지일", "게시일", "블로그", "시도", "시군구", "읍면동", "종류", "형태",
-               "거래금액", "매출", "객실수", "제목", "링크", "상태"]
+               "거래금액", "매출", "객실수", "제목", "링크", "상태", "중복그룹"]
+PREV_CARD_HEADER = CARD_HEADER[:-1]   # '중복그룹' 칸이 없던 이전 버전(=마이그레이션 대상)
 
 RECENT_DAYS = 14       # 이 기간 안에 올라온 새 글만 (첫 실행 폭주/놓침 방지)
 SLEEP_SEC = 2.0        # 블로그 사이 간격 (천천히 돌아 차단 회피)
@@ -51,6 +57,36 @@ SEED_BLOGS = [
     "yoondang__", "eitting2018", "water_ah_", "gyonryoru", "spacementor",
     "korea-7942-", "7979sic", "sojwa07", "jjsskk0815", "ska6565",
 ]
+
+# ─────────────────── 종류 필터 (고시원·거주형·비숙박 제거) ───────────────────
+# 숙박 키워드: 종류에 이게 들어가면 '무조건 통과'.
+#   (민박주택·한옥스테이·관광용 호텔처럼 거주/비숙박 단어가 섞여도 숙박이면 구제)
+LODGING_KW = [
+    "모텔", "호텔", "여관", "여인숙", "호스텔", "펜션", "게스트하우스", "게하",
+    "민박", "풀빌", "무인텔", "무인호텔", "관광", "비지니스", "비즈니스",
+    "레지던스", "캡슐", "한옥", "숙박", "스테이", "단기숙소", "체류형", "쉼터", "세컨하우스",
+]
+# 명백한 거주형·완전비숙박: 위 숙박 키워드가 '없으면서' 이게 들어가면 제외.
+EXCLUDE_KW = [
+    "고시원", "고시텔", "원룸텔", "원룸", "주택", "주거시설", "오피스텔",
+    "상가", "빌딩", "사옥", "건물", "토지", "대지", "임야",
+    "병원", "요양병원", "의료시설", "체육", "PC방", "피씨방",
+    "이자카야", "회원권", "근린생활시설", "위락시설", "캠핑장",
+]
+
+
+def is_excluded_kind(kind):
+    """고시원·거주형·완전비숙박이면 True(시트에 안 올림).
+    종류가 비어 있거나(=GPT가 못 뽑음) 애매하면 False(그대로 남김)."""
+    s = str(kind or "").strip()
+    if not s:
+        return False
+    if any(k in s for k in LODGING_KW):
+        return False
+    if any(k in s for k in EXCLUDE_KW):
+        return True
+    return False
+
 
 # ════════════════════════════════ GPT ════════════════════════════════
 EXTRACT_PROMPT = """다음은 부동산 중개 블로그 글이다. 숙박시설(모텔·호텔·호스텔·고시원·펜션·게스트하우스·여관 등)의 매매 또는 임대 매물 광고인지 판단하고, 매물이면 항목을 추출하라.
@@ -90,13 +126,13 @@ def gpt_extract(oai, title, body):
     return json.loads(resp.choices[0].message.content)
 
 
-def build_row(today, posted, bid, info, title, link, status=""):
+def build_row(today, posted, bid, info, title, link, status="", dup=""):
     return [
         today, posted, bid,
         info.get("시도", ""), info.get("시군구", ""), info.get("읍면동", ""),
         info.get("종류", ""), info.get("형태", ""),
         info.get("거래금액", ""), info.get("매출", ""), info.get("객실수", ""),
-        title, link, status,
+        title, link, status, dup,
     ]
 
 
@@ -208,8 +244,11 @@ def load_blogs(ss):
 
 
 def setup_card_tab(ss):
-    """매물카드 탭을 준비한다. 옛 형식이면 백업 후 새로 만든다.
-    반환: (새 워크시트, 중복방지용 기존 링크 리스트)"""
+    """매물카드 탭을 준비한다.
+      - 이미 신형식(중복그룹 칸 있음): 그대로 사용
+      - 중복그룹 칸만 없는 이전 형식: 칸만 추가(데이터 보존)
+      - 그 외 진짜 옛 형식: 백업 후 새로 만듦
+    반환: (워크시트, 중복방지용 기존 링크 리스트)"""
     try:
         ws = ss.worksheet(CARD_TAB)
     except gspread.WorksheetNotFound:
@@ -222,7 +261,13 @@ def setup_card_tab(ss):
         links = ws.col_values(CARD_HEADER.index("링크") + 1)[1:]
         return ws, links
 
-    # 옛 형식 → 기존 링크 수집(중복방지) 후 백업, 새 탭 생성
+    if header == PREV_CARD_HEADER:                 # '중복그룹' 칸만 추가 (데이터 보존)
+        ws.update_cell(1, len(CARD_HEADER), "중복그룹")
+        print("  매물카드에 '중복그룹' 칸을 추가했습니다(기존 데이터 보존).")
+        links = ws.col_values(CARD_HEADER.index("링크") + 1)[1:]
+        return ws, links
+
+    # 그 외 진짜 옛 형식 → 기존 링크 수집(중복방지) 후 백업, 새 탭 생성
     old_links = ws.col_values(header.index("링크") + 1)[1:] if "링크" in header else []
     backup = CARD_TAB + "_old"
     try:
@@ -237,6 +282,49 @@ def setup_card_tab(ss):
     return new_ws, old_links
 
 
+def recompute_dup_groups(card_ws):
+    """매물카드 전체에서 위치(시군구+읍면동)+거래금액이 같은 묶음에
+    중복그룹 번호(D1, D2…)를 매긴다. 2건 이상만 번호를 받고,
+    가격이 비어 있으면 묶지 않는다(빈칸). 행은 지우지 않고 '중복그룹' 칸만 갱신.
+    반환: 중복 그룹 개수."""
+    vals = card_ws.get_all_values()
+    if len(vals) < 2:
+        return 0
+    header = vals[0]
+    idx = {h: i for i, h in enumerate(header)}
+    if any(h not in idx for h in ("시군구", "읍면동", "거래금액", "중복그룹")):
+        return 0
+    si, ei, pi, gi = idx["시군구"], idx["읍면동"], idx["거래금액"], idx["중복그룹"]
+
+    def norm(x):
+        return re.sub(r"[^0-9가-힣]", "", str(x or ""))
+
+    groups = defaultdict(list)
+    for r, row in enumerate(vals[1:], start=2):
+        gu = row[si] if len(row) > si else ""
+        dong = row[ei] if len(row) > ei else ""
+        price = row[pi] if len(row) > pi else ""
+        if gu.strip() and dong.strip() and price.strip():
+            groups[norm(gu) + "|" + norm(dong) + "|" + norm(price)].append(r)
+
+    labels, n = {}, 0
+    for rows in groups.values():
+        if len(rows) >= 2:
+            n += 1
+            for r in rows:
+                labels[r] = f"D{n}"
+
+    # '중복그룹' 칸 한 컬럼을 한 번의 호출로 갱신 (분당 한도 회피)
+    last = len(vals)
+    col = re.sub(r"\d", "", rowcol_to_a1(1, gi + 1))   # 컬럼 문자(예: O)
+    body = [[labels.get(r, "")] for r in range(2, last + 1)]
+    card_ws.batch_update(
+        [{"range": f"{col}2:{col}{last}", "values": body}],
+        value_input_option="RAW",
+    )
+    return n
+
+
 # ════════════════════════════════ 메인 ════════════════════════════════
 def main():
     oai = get_openai()
@@ -249,7 +337,7 @@ def main():
 
     today = datetime.now(KST).strftime("%Y-%m-%d")
     new_rows = []
-    n_rss_fail = n_skip = n_gpt_fail = 0
+    n_rss_fail = n_skip = n_excl = n_gpt_fail = 0
 
     print(f"감시 시작 — 블로그 {len(blogs)}개, 기존 {len(seen)}건 (모델 {MODEL})")
     for bid in blogs:
@@ -288,6 +376,10 @@ def main():
                 n_skip += 1
                 continue
 
+            if is_excluded_kind(info.get("종류", "")):   # 고시원·거주형·비숙박이면 안 올림
+                n_excl += 1
+                continue
+
             new_rows.append(build_row(today, posted, bid, info, title, link, ""))
             added += 1
 
@@ -298,9 +390,17 @@ def main():
     if new_rows:
         card_ws.append_rows(new_rows, value_input_option="RAW")
 
+    # 매물카드 전체(과거분 포함) 중복그룹 갱신
+    try:
+        n_dup = recompute_dup_groups(card_ws)
+        print(f"중복그룹 갱신: {n_dup}개 그룹")
+    except Exception as e:
+        print(f"중복그룹 갱신 실패: {e}")
+
     print("─" * 52)
     print(f"완료 — 새 매물 {len(new_rows)}건 추가  "
-          f"(비매물 제외 {n_skip} · GPT실패 {n_gpt_fail} · RSS실패 {n_rss_fail}곳)")
+          f"(비매물 {n_skip} · 거주형/비숙박 제외 {n_excl} · "
+          f"GPT실패 {n_gpt_fail} · RSS실패 {n_rss_fail}곳)")
 
 
 if __name__ == "__main__":
