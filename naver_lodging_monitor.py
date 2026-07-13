@@ -1,26 +1,31 @@
 # -*- coding: utf-8 -*-
 """
-숙박 매물 신규 감시기 — GPT 추출 버전 (+ 종류필터 + 중복그룹)
+숙박 매물 신규 감시기 — 2단계 게이트 버전 (+ 종류필터 + 중복그룹 + 건물스펙)
 ─────────────────────────────────────────────────────────
 하는 일:
   1) '블로그목록' 탭의 블로그 RSS를 돌면서
   2) 전에 본 적 없는 새 글(=새 매물 후보)만 골라
-  3) 제목+본문(RSS 일부)을 GPT에게 주고
-       시도·시군구·종류·형태·거래금액·매출·객실수를 뽑게 하고
-       매물이 아니면(맛집·정보·일상 글) 걸러내고
-  4) [신규] 종류가 고시원·거주형·완전비숙박이면 시트에 안 올린다
+  3) [변경] 2단계로 GPT에 태운다.
+       1차(게이트): 제목 + 본문 앞 700자 → "매물이냐 아니냐"만 판정.
+                    비매물이면 여기서 끝. (대부분이 여기서 걸러지므로 토큰 절약)
+       2차(추출) : 매물일 때만 본문 전문(4000자)으로 전 항목 추출.
+                    → 위치·종류·형태·금액·매출·객실수 + [신규] 대지면적·연면적·층수·준공연도·위반건축물
+     ※ 기존엔 본문을 3000자 가져와 놓고 800자만 GPT에 줬다. 광고글은 미사여구가 앞에 오고
+       스펙 블록(면적·층수·객실수·사용승인일)이 뒤에 몰려 있어서 그게 통째로 잘렸다.
+       fetch는 원래 하던 그대로라 네이버 요청량은 늘지 않는다.
+  4) 종류가 고시원·거주형·완전비숙박이면 시트에 안 올린다
   5) '매물카드' 탭에 한 줄씩 쌓는다.
-  6) [신규] 다 쌓은 뒤, 매물카드 전체에서 위치+가격이 같은 도배 매물에
+  6) 다 쌓은 뒤, 매물카드 전체에서 위치+가격이 같은 도배 매물에
        중복그룹 번호(D1, D2…)를 매긴다. (행은 안 지우고 표시만)
 
 필요 환경변수(둘 다 GitHub Secret):
   GCP_CREDENTIALS_JSON  : 구글 서비스계정 키(JSON 문자열)
-  OPENAI_API_KEY        : OpenAI 키 (기존 autogit에서 쓰던 것 재사용)
+  OPENAI_API_KEY        : OpenAI 키
 
 준비물: 대상 구글시트를 서비스계정 이메일에 '편집자'로 공유해 둘 것.
 
-※ 기존 '매물카드'가 '중복그룹' 칸이 없던 형식이면, 데이터를 그대로 두고
-  '중복그룹' 칸만 자동으로 추가한다. (백업/재생성 안 함, 중복도 안 쌓임)
+※ 매물카드 칸은 '뒤에만' 늘어난다(기존 15칸 위치 그대로 + 신규 5칸).
+  기존 데이터는 밀리지 않고 그대로 보존된다. 백업/재생성 안 함.
 """
 import os
 import re
@@ -40,13 +45,17 @@ from openai import OpenAI
 SHEET_KEY = "1nQuvBD99FafPYnIKDyvSugNnDZhUbrkbX7hoFDWOiCY"
 BLOG_TAB = "블로그목록"
 CARD_TAB = "매물카드"
+
+# 기존 15칸은 순서 그대로 두고, 신규 5칸은 '맨 뒤'에만 붙인다(기존 데이터 안 밀림).
 CARD_HEADER = ["감지일", "게시일", "블로그", "시도", "시군구", "읍면동", "종류", "형태",
-               "거래금액", "매출", "객실수", "제목", "링크", "상태", "중복그룹"]
-PREV_CARD_HEADER = CARD_HEADER[:-1]   # '중복그룹' 칸이 없던 이전 버전(=마이그레이션 대상)
+               "거래금액", "매출", "객실수", "제목", "링크", "상태", "중복그룹",
+               "대지면적", "연면적", "층수", "준공연도", "위반건축물"]
+# 이전 형식들(뒤에서 잘라낸 모양). 헤더가 이 중 하나면 '부족한 칸만' 채워 넣는다.
+PREV_HEADERS = [CARD_HEADER[:15], CARD_HEADER[:14]]
 
 RECENT_DAYS = 14       # 이 기간 안에 올라온 새 글만 (첫 실행 폭주/놓침 방지)
 SLEEP_SEC = 2.0        # 블로그 사이 간격 (천천히 돌아 차단 회피)
-MODEL = "gpt-4o-mini"  # 접근이 안 되면 "gpt-3.5-turbo" 로 바꿔도 됨
+MODEL = "gpt-4o-mini"
 RSS_TMPL = "https://rss.blog.naver.com/{}.xml"
 UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36"}
 KST = timezone(timedelta(hours=9))
@@ -59,7 +68,6 @@ SEED_BLOGS = [
 ]
 
 # 비숙박 전문 블로그 — 감시에서 영구 제외(발굴기가 다시 편입해도 무시).
-# 여기에 블로그ID만 추가하면 그 블로그는 다시 안 긁는다.
 BLOCKLIST = {
     "stewzinnia59",   # 부동산 분양/상담
     "ksanchoi",       # 경매
@@ -71,18 +79,17 @@ BLOCKLIST = {
     "moneyschool300", # 숙박업 강의/클래스
 }
 
-EXTRACT_BODY_CHARS = 800   # GPT에 보낼 본문 길이(글자). 매물 정보는 앞부분에 몰려 있어 800이면 충분.
-GPT_RETRIES = 3            # rate limit/timeout 시 재시도 횟수(1→2→4초 백오프)
+GATE_BODY_CHARS = 700    # 1차 게이트: 매물이냐 아니냐만 보므로 앞부분이면 충분
+FULL_BODY_CHARS = 4000   # 2차 추출: 매물일 때만. 스펙 블록이 글 뒤에 있어서 넉넉히
+FETCH_HTML_WINDOW = 80000  # 본문 컨테이너에서 읽을 HTML 길이(긴 광고글 대비)
+GPT_RETRIES = 3          # rate limit/timeout 시 재시도 (1→2→4초 백오프)
 
 # ─────────────────── 종류 필터 (고시원·거주형·비숙박 제거) ───────────────────
-# 숙박 키워드: 종류에 이게 들어가면 '무조건 통과'.
-#   (민박주택·한옥스테이·관광용 호텔처럼 거주/비숙박 단어가 섞여도 숙박이면 구제)
 LODGING_KW = [
     "모텔", "호텔", "여관", "여인숙", "호스텔", "펜션", "게스트하우스", "게하",
     "민박", "풀빌", "무인텔", "무인호텔", "관광", "비지니스", "비즈니스",
     "레지던스", "캡슐", "한옥", "숙박", "스테이", "단기숙소", "체류형", "쉼터", "세컨하우스",
 ]
-# 명백한 거주형·완전비숙박: 위 숙박 키워드가 '없으면서' 이게 들어가면 제외.
 EXCLUDE_KW = [
     "고시원", "고시텔", "원룸텔", "원룸", "주택", "주거시설", "오피스텔",
     "상가", "빌딩", "사옥", "건물", "토지", "대지", "임야",
@@ -105,23 +112,43 @@ def is_excluded_kind(kind):
 
 
 # ════════════════════════════════ GPT ════════════════════════════════
-EXTRACT_PROMPT = """다음은 부동산 중개 블로그 글이다. 숙박시설(모텔·호텔·호스텔·고시원·펜션·게스트하우스·여관 등)의 매매 또는 임대 매물 광고인지 판단하고, 매물이면 항목을 추출하라.
+# 1차 — 게이트. 매물이냐 아니냐만. 비매물이 대부분이라 여기서 대부분 끝난다.
+GATE_PROMPT = """다음 블로그 글이 숙박시설(모텔·호텔·호스텔·펜션·게스트하우스·여관 등)의 매매 또는 임대 '매물 광고'인지만 판단하라.
+
+- 매물 광고: 특정 물건을 팔거나 임대하려고 올린 글.
+- 비매물: 맛집·여행후기·이용후기·정보·상식·일상·강의·세미나 홍보 등.
+- 애매하면 "매물"로 한다. (뒤에서 다시 정밀 판정한다)
+
+제목: {title}
+본문: {body}
+
+JSON으로만 답하라: {{"매물여부":"매물 또는 비매물"}}"""
+
+
+# 2차 — 추출. 매물일 때만. 본문 전문을 준다.
+EXTRACT_PROMPT = """다음은 부동산 중개 블로그의 숙박시설 매물 광고다. 항목을 추출하라.
 
 규칙:
 - 글에 실제로 있는 내용만 쓴다. 절대 지어내지 않는다. 모르면 빈 문자열 "".
 - "거래금액"은 보증금·월세·매매가 같은 실제 거래 가격이다. "매출"은 월매출·순수익이다. 이 둘을 절대 섞지 않는다.
-- "거래금액"과 "매출"은 글에 적힌 표기 그대로 쓴다(예: "보증금 3억", "월세 3500만", "매매가 25억", "월매출 4000만", "순수익 800만"). 절대 원 단위 숫자로 풀어쓰지 않는다(예: 40000000 같은 형태 금지).
-- 맛집·후기·정보·상식·일상 글이면 "매물여부"를 "비매물"로 한다.
+- "거래금액"과 "매출"은 글에 적힌 표기 그대로 쓴다(예: "보증금 3억", "월세 600만", "매매가 25억", "월매출 4000만", "순수익 800만"). 절대 원 단위 숫자로 풀어쓰지 않는다(예: 40000000 같은 형태 금지).
+- 매물 광고가 아니라 맛집·후기·정보·일상 글이면 "매물여부"를 "비매물"로 한다.
 - "시도"는 광역시/도 정식명(서울특별시, 경기도, 부산광역시 등). 동·역 이름으로 분명히 알 수 있으면 채운다(예: 강동역→서울특별시, 수원→경기도). 애매하면 "".
 - "시군구"는 시/군/구(예: 수원시, 강동구). "읍면동"은 동·읍·면·리(예: 구운동, 초량동, 부강면). 없으면 "".
 - "형태"는 매매면 "매매", 임대면 "임대", 둘 다면 "매매/임대".
-- "객실수"는 숫자+실 형식(예: 54실). 없으면 "".
+- "객실수"는 숫자+실 형식(예: 54실). "객실 20", "20개실", "20룸" 처럼 적혀 있어도 "20실"로 통일한다. 없으면 "".
+
+[건물 스펙] — 글 뒷부분의 물건개요·상세정보 블록에 몰려 있는 경우가 많다. 끝까지 읽고 찾아라.
+- "대지면적"·"연면적": 글에 적힌 표기 그대로 단위까지(예: "189.1㎡", "230평", "761.76m2"). 토지면적으로 적혀 있으면 대지면적으로 본다. 없으면 "".
+- "층수": 지하·지상을 함께 적는다(예: "지하1층/지상5층", "5층", "지상4층"). 없으면 "".
+- "준공연도": 사용승인일·준공일의 연도 4자리만(예: "1989"). 없으면 "".
+- "위반건축물": 위반·위법건축물 언급이 있으면 "有", 없다고 명시하면 "無", 아무 언급 없으면 "".
 
 제목: {title}
 본문: {body}
 
 아래 JSON 형식으로만 답하라:
-{{"매물여부":"매물 또는 비매물","시도":"","시군구":"","읍면동":"","종류":"","형태":"","거래금액":"","매출":"","객실수":""}}"""
+{{"매물여부":"매물 또는 비매물","시도":"","시군구":"","읍면동":"","종류":"","형태":"","거래금액":"","매출":"","객실수":"","대지면적":"","연면적":"","층수":"","준공연도":"","위반건축물":""}}"""
 
 
 def get_openai():
@@ -131,8 +158,8 @@ def get_openai():
     return OpenAI(api_key=key)
 
 
-def gpt_extract(oai, title, body):
-    content = EXTRACT_PROMPT.format(title=title, body=(body or "")[:EXTRACT_BODY_CHARS])
+def _chat_json(oai, content):
+    """공통 호출부. rate limit/timeout이면 1→2→4초 백오프 후 재시도."""
     last_err = None
     for attempt in range(GPT_RETRIES):
         try:
@@ -146,8 +173,18 @@ def gpt_extract(oai, title, body):
         except Exception as e:
             last_err = e
             if attempt < GPT_RETRIES - 1:
-                time.sleep(2 ** attempt)   # 1초 → 2초 → 4초 대기 후 재시도
+                time.sleep(2 ** attempt)
     raise last_err   # 끝까지 실패하면 호출부에서 '확인필요(GPT실패)'로 기록
+
+
+def gpt_gate(oai, title, body):
+    """1차: 매물이냐 아니냐만 (본문 앞 700자)."""
+    return _chat_json(oai, GATE_PROMPT.format(title=title, body=(body or "")[:GATE_BODY_CHARS]))
+
+
+def gpt_extract(oai, title, body):
+    """2차: 매물일 때만 전 항목 추출 (본문 전문)."""
+    return _chat_json(oai, EXTRACT_PROMPT.format(title=title, body=(body or "")[:FULL_BODY_CHARS]))
 
 
 def build_row(today, posted, bid, info, title, link, status="", dup=""):
@@ -157,6 +194,8 @@ def build_row(today, posted, bid, info, title, link, status="", dup=""):
         info.get("종류", ""), info.get("형태", ""),
         info.get("거래금액", ""), info.get("매출", ""), info.get("객실수", ""),
         title, link, status, dup,
+        info.get("대지면적", ""), info.get("연면적", ""), info.get("층수", ""),
+        info.get("준공연도", ""), info.get("위반건축물", ""),
     ]
 
 
@@ -224,7 +263,9 @@ def parse_link(url):
 
 def fetch_post_body(bid, logno):
     """모바일 블로그 페이지에서 본문 텍스트를 가져온다. 실패하면 빈 문자열.
-    이미지 표에 박힌 정보는 텍스트가 없으므로 못 가져온다(그건 비전 영역)."""
+    ※ 요청 방식은 기존과 동일. 다만 긴 광고글이 잘리지 않게 읽는 창만 넓혔다.
+      (스펙 블록이 글 뒤에 있어서, 좁게 읽으면 그 부분이 통째로 날아갔다)
+    이미지 표에만 박힌 정보는 텍스트가 없으므로 여전히 못 가져온다."""
     if not (bid and logno):
         return ""
     url = f"https://m.blog.naver.com/{bid}/{logno}"
@@ -234,8 +275,8 @@ def fetch_post_body(bid, logno):
         html = r.text
         i = html.find("se-main-container")   # 본문 컨테이너 시작
         if i != -1:
-            html = html[i:i + 20000]
-        return strip_html(html)[:3000]
+            html = html[i:i + FETCH_HTML_WINDOW]
+        return strip_html(html)[:FULL_BODY_CHARS]
     except Exception:
         return ""
 
@@ -271,8 +312,8 @@ def load_blogs(ss):
 
 def setup_card_tab(ss):
     """매물카드 탭을 준비한다.
-      - 이미 신형식(중복그룹 칸 있음): 그대로 사용
-      - 중복그룹 칸만 없는 이전 형식: 칸만 추가(데이터 보존)
+      - 이미 신형식(20칸): 그대로 사용
+      - 이전 형식(15칸/14칸): 부족한 칸만 '뒤에' 추가 (기존 데이터 보존, 밀리지 않음)
       - 그 외 진짜 옛 형식: 백업 후 새로 만듦
     반환: (워크시트, 중복방지용 기존 링크 리스트)"""
     try:
@@ -282,14 +323,20 @@ def setup_card_tab(ss):
         ws.append_row(CARD_HEADER, value_input_option="RAW")
         return ws, []
 
+    # 칸 수가 모자라면 먼저 늘린다 (안 하면 헤더 쓰기에서 에러)
+    if ws.col_count < len(CARD_HEADER):
+        ws.resize(cols=len(CARD_HEADER) + 2)
+
     header = ws.row_values(1)
     if header == CARD_HEADER:                      # 이미 새 형식
         links = ws.col_values(CARD_HEADER.index("링크") + 1)[1:]
         return ws, links
 
-    if header == PREV_CARD_HEADER:                 # '중복그룹' 칸만 추가 (데이터 보존)
-        ws.update_cell(1, len(CARD_HEADER), "중복그룹")
-        print("  매물카드에 '중복그룹' 칸을 추가했습니다(기존 데이터 보존).")
+    if header in PREV_HEADERS:                     # 부족한 칸만 뒤에 추가 (데이터 보존)
+        add = CARD_HEADER[len(header):]
+        rng = f"{rowcol_to_a1(1, len(header) + 1)}:{rowcol_to_a1(1, len(CARD_HEADER))}"
+        ws.batch_update([{"range": rng, "values": [add]}], value_input_option="RAW")
+        print(f"  매물카드에 칸 {len(add)}개 추가(기존 데이터 보존): {add}")
         links = ws.col_values(CARD_HEADER.index("링크") + 1)[1:]
         return ws, links
 
@@ -311,8 +358,7 @@ def setup_card_tab(ss):
 def recompute_dup_groups(card_ws):
     """매물카드 전체에서 위치(시군구+읍면동)+거래금액이 같은 묶음에
     중복그룹 번호(D1, D2…)를 매긴다. 2건 이상만 번호를 받고,
-    가격이 비어 있으면 묶지 않는다(빈칸). 행은 지우지 않고 '중복그룹' 칸만 갱신.
-    반환: 중복 그룹 개수."""
+    가격이 비어 있으면 묶지 않는다(빈칸). 행은 지우지 않고 '중복그룹' 칸만 갱신."""
     vals = card_ws.get_all_values()
     if len(vals) < 2:
         return 0
@@ -342,7 +388,7 @@ def recompute_dup_groups(card_ws):
 
     # '중복그룹' 칸 한 컬럼을 한 번의 호출로 갱신 (분당 한도 회피)
     last = len(vals)
-    col = re.sub(r"\d", "", rowcol_to_a1(1, gi + 1))   # 컬럼 문자(예: O)
+    col = re.sub(r"\d", "", rowcol_to_a1(1, gi + 1))
     body = [[labels.get(r, "")] for r in range(2, last + 1)]
     card_ws.batch_update(
         [{"range": f"{col}2:{col}{last}", "values": body}],
@@ -363,9 +409,10 @@ def main():
 
     today = datetime.now(KST).strftime("%Y-%m-%d")
     new_rows = []
-    n_rss_fail = n_skip = n_excl = n_gpt_fail = 0
+    n_rss_fail = n_gate_skip = n_skip = n_excl = n_gpt_fail = n_spec = 0
 
-    print(f"감시 시작 — 블로그 {len(blogs)}개(비숙박 {len(BLOCKLIST)}개 제외), 기존 {len(seen)}건 (모델 {MODEL})")
+    print(f"감시 시작 — 블로그 {len(blogs)}개(비숙박 {len(BLOCKLIST)}개 제외), "
+          f"기존 {len(seen)}건 (모델 {MODEL}, 게이트 {GATE_BODY_CHARS}자 / 추출 {FULL_BODY_CHARS}자)")
     for bid in blogs:
         try:
             feed = fetch_feed(bid)
@@ -390,21 +437,38 @@ def main():
             body = fetch_post_body(bid_, logno_) or entry_body(entry)  # 본문 우선, 실패 시 RSS 일부
             time.sleep(0.7)   # 본문 접속 간격 (차단 회피)
 
+            # ── 1차 게이트: 매물이냐 아니냐 (앞 700자) ─────────────────────
             try:
-                info = gpt_extract(oai, title, body)
-            except Exception as e:
+                gate = gpt_gate(oai, title, body)
+            except Exception:
                 n_gpt_fail += 1
                 new_rows.append(build_row(today, posted, bid, {}, title, link, "확인필요(GPT실패)"))
                 added += 1
                 continue
 
-            if str(info.get("매물여부", "")).strip() == "비매물":
+            if str(gate.get("매물여부", "")).strip() == "비매물":
+                n_gate_skip += 1
+                continue    # 여기서 끝 — 2차 호출 안 함(토큰 절약)
+
+            # ── 2차 추출: 매물일 때만 전문(4000자)으로 전 항목 ────────────
+            try:
+                info = gpt_extract(oai, title, body)
+            except Exception:
+                n_gpt_fail += 1
+                new_rows.append(build_row(today, posted, bid, {}, title, link, "확인필요(GPT실패)"))
+                added += 1
+                continue
+
+            if str(info.get("매물여부", "")).strip() == "비매물":   # 2차에서 뒤집힌 경우
                 n_skip += 1
                 continue
 
             if is_excluded_kind(info.get("종류", "")):   # 고시원·거주형·비숙박이면 안 올림
                 n_excl += 1
                 continue
+
+            if any(info.get(k) for k in ("대지면적", "연면적", "층수", "준공연도")):
+                n_spec += 1
 
             new_rows.append(build_row(today, posted, bid, info, title, link, ""))
             added += 1
@@ -424,9 +488,10 @@ def main():
         print(f"중복그룹 갱신 실패: {e}")
 
     print("─" * 52)
-    print(f"완료 — 새 매물 {len(new_rows)}건 추가  "
-          f"(비매물 {n_skip} · 거주형/비숙박 제외 {n_excl} · "
-          f"GPT실패 {n_gpt_fail} · RSS실패 {n_rss_fail}곳)")
+    print(f"완료 — 새 매물 {len(new_rows)}건 추가 (그중 건물스펙 확보 {n_spec}건)")
+    print(f"       1차 게이트 컷 {n_gate_skip} · 2차 비매물 {n_skip} · "
+          f"거주형/비숙박 제외 {n_excl} · GPT실패 {n_gpt_fail} · RSS실패 {n_rss_fail}곳")
+    print("→ '건물스펙 확보' 건수를 보세요. 이게 0에 가까우면 광고 텍스트에 스펙이 없다는 뜻입니다.")
 
 
 if __name__ == "__main__":
