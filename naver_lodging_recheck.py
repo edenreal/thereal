@@ -51,6 +51,8 @@ SLEEP_SEC = 0.6   # 본문 접속 간격 (네이버 차단 회피)
 BLOCKLIST = {
     "stewzinnia59", "ksanchoi", "auctionrun3988", "sbjjjang", "kj-4848", "jijonbpbp",
     "kkanglive", "moneyschool300",
+    # 2026-07-31 추가 — 숙박매물 0건·전량 비숙박(코인/주식/맛집/공장 등)
+    "h3h2003", "foremanenc", "sanergy_3051", "kymin0909",
 }
 
 # 감시기(naver_lodging_monitor.py)와 동일한 종류 화이트리스트.

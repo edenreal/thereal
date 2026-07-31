@@ -52,6 +52,8 @@ APPROVE_MARKS = {"O", "Y", "ㅇ", "승인", "예"}
 BLOCKLIST = {
     "stewzinnia59", "ksanchoi", "auctionrun3988", "sbjjjang", "kj-4848", "jijonbpbp",
     "kkanglive", "moneyschool300",
+    # 2026-07-31 추가 — 숙박매물 0건·전량 비숙박(코인/주식/맛집/공장 등)
+    "h3h2003", "foremanenc", "sanergy_3051", "kymin0909",
 }
 
 

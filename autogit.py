@@ -54,9 +54,10 @@ def _call_gpt_and_parse(text: str) -> dict:
 {text}
 """
     resp = client.chat.completions.create(
-        model="gpt-3.5-turbo",
+        model="gpt-4o-mini",   # 2026-07-31 gpt-3.5-turbo→4o-mini: 더 싸고 추출 품질↑
         messages=[{"role": "user", "content": prompt}],
         temperature=0.2,
+        response_format={"type": "json_object"},   # json.loads 안정화(마크다운 감싸기 방지)
     )
     return json.loads(resp.choices[0].message.content)
 

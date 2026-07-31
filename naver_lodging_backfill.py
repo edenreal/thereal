@@ -55,6 +55,8 @@ SKIP_STATUS = {"비매물(백필)", "본문없음(백필)", "비매물(재처리
 BLOCKLIST = {
     "stewzinnia59", "ksanchoi", "auctionrun3988", "sbjjjang", "kj-4848", "jijonbpbp",
     "kkanglive", "moneyschool300",
+    # 2026-07-31 추가 — 숙박매물 0건·전량 비숙박(코인/주식/맛집/공장 등)
+    "h3h2003", "foremanenc", "sanergy_3051", "kymin0909",
 }
 
 # ════════ GPT — 감시기의 2차 추출 프롬프트와 반드시 동일하게 유지 ════════
