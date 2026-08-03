@@ -1,0 +1,35 @@
+name: 매물카드 노이즈 정리 (수동)
+
+# 자동 실행 없음. Actions 탭에서 'Run workflow' 버튼으로만 돈다.
+# 기본은 preview(개수만 확인). 실제 삭제는 mode=delete + confirm=DELETE.
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'preview(미리보기, 안전) / delete(실제삭제)'
+        required: true
+        default: 'preview'
+        type: choice
+        options:
+          - preview
+          - delete
+      confirm:
+        description: "delete일 때만: 정말 지우려면 'DELETE' 입력"
+        required: false
+        default: ''
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install gspread google-auth
+      - name: 정리 실행
+        env:
+          GCP_CREDENTIALS_JSON: ${{ secrets.GCP_CREDENTIALS_JSON }}
+          CLEANUP_MODE: ${{ github.event.inputs.mode }}
+          CLEANUP_CONFIRM: ${{ github.event.inputs.confirm }}
+        run: python naver_lodging_cleanup.py
