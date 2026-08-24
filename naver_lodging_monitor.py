@@ -45,6 +45,7 @@ from openai import OpenAI
 SHEET_KEY = "1nQuvBD99FafPYnIKDyvSugNnDZhUbrkbX7hoFDWOiCY"
 BLOG_TAB = "블로그목록"
 CARD_TAB = "매물카드"
+GATE_TAB = "게이트제외"   # 1차 게이트에서 '비매물'로 잘린 글의 링크 보관(재판정 방지)
 
 # 기존 15칸은 순서 그대로 두고, 신규 5칸은 '맨 뒤'에만 붙인다(기존 데이터 안 밀림).
 CARD_HEADER = ["감지일", "게시일", "블로그", "시도", "시군구", "읍면동", "종류", "형태",
@@ -103,6 +104,31 @@ LODGING_KW = [
     "관광숙박", "비지니스호텔", "비즈니스호텔", "캡슐호텔", "한옥스테이",
     "에어비앤비", "에어비엔비", "리조트",
 ]
+
+
+# ─────────────── 제목 사전필터 (GPT 게이트 이전, 비용 0) ───────────────
+# 명백한 비숙박 글은 본문 fetch·GPT 호출 전에 제목만 보고 건너뛴다.
+# 안전 규칙(둘 중 하나라도 해당하면 절대 안 버림):
+#   ① 숙박 키워드(LODGING_KW)가 제목에 있음
+#   ② 숙박 구조신호(객실수·매출 등)가 제목에 있음  ← '토지817㎡, 객실28개' 같은 매물 보호
+# 검증(2026-08-24): 과거 정상매물 2,791건에 적용해 오탐 0건(걸린 3건은 전부 원룸/오피스텔=원래 비숙박).
+TITLE_NEG = re.compile(
+    r"코인|비트코인|이더리움|주식|코스피|코스닥|상장|급락|방산주|테마주|환율|"
+    r"아파트|빌라|다세대|연립|원룸|투룸|쓰리룸|오피스텔|재개발|재건축|청약|분양권|"
+    r"토지|임야|농지|전답|공장|창고|물류센터|"
+    r"경매|타경|공매|맛집|여행후기|학원|골프연습장"
+)
+TITLE_RESCUE = re.compile(r"객실|\d+\s*실|월매출|매출|\d+\s*룸")
+
+
+def title_prefilter_skip(title):
+    """True면 GPT를 부르지 않고 건너뛴다(명백한 비숙박)."""
+    t = str(title or "")
+    if any(k in t for k in LODGING_KW):
+        return False
+    if TITLE_RESCUE.search(t):
+        return False
+    return bool(TITLE_NEG.search(t))
 
 
 def is_excluded_kind(kind, title=""):
@@ -374,6 +400,46 @@ def setup_card_tab(ss):
     return new_ws, old_links
 
 
+def setup_gate_tab(ss):
+    """게이트제외 탭을 준비하고, 이미 '비매물'로 판정된 링크 집합을 돌려준다.
+
+    [왜 필요한가] 예전엔 1차 게이트에서 잘린 글을 아무 데도 남기지 않았다.
+    그런데 다음 실행에서 seen을 '매물카드 링크'로만 다시 만들기 때문에,
+    잘린 글이 RSS에 남아 있는 동안(RECENT_DAYS=14) 매 실행마다 다시 본문을 받고
+    GPT 게이트를 또 돌렸다. 하루 2회 × 14일 = 같은 글을 최대 28번 재판정.
+    (실측: 게이트 컷 수가 1267·1284·1284·1292·1291로 12시간 간격에도 거의 불변)
+    → 여기에 링크를 남겨 두 번 다시 판정하지 않는다.
+
+    ※ temperature=0이라 재판정해도 결과는 같다 → 건너뛰어도 잃는 정보가 없다.
+    """
+    header = ["제외일", "블로그", "링크", "제목"]
+    try:
+        ws = ss.worksheet(GATE_TAB)
+    except gspread.WorksheetNotFound:
+        ws = ss.add_worksheet(GATE_TAB, rows=20000, cols=len(header))
+        ws.append_row(header, value_input_option="RAW")
+        return ws, set()
+    links = ws.col_values(header.index("링크") + 1)[1:]
+    return ws, {canon_link(u) for u in links if u.strip()}
+
+
+def prune_gate_tab(ws, keep_days=45):
+    """오래된 제외기록 정리. RSS는 최근 글만 주므로 오래된 링크는 다시 나타나지 않는다.
+    (시트가 무한정 커지는 것 방지. 실패해도 감시에는 영향 없음)"""
+    vals = ws.get_all_values()
+    if len(vals) < 2:
+        return 0
+    cutoff = (datetime.now(KST) - timedelta(days=keep_days)).strftime("%Y-%m-%d")
+    keep = [r for r in vals[1:] if (r[0] if r else "") >= cutoff]
+    removed = len(vals) - 1 - len(keep)
+    if removed <= 0:
+        return 0
+    ws.batch_clear([f"A2:D{len(vals)}"])
+    if keep:
+        ws.batch_update([{"range": f"A2:D{len(keep) + 1}", "values": keep}], value_input_option="RAW")
+    return removed
+
+
 def recompute_dup_groups(card_ws):
     """매물카드 전체에서 위치(시군구+읍면동)+거래금액이 같은 묶음에
     중복그룹 번호(D1, D2…)를 매긴다. 2건 이상만 번호를 받고,
@@ -424,14 +490,17 @@ def main():
 
     blogs = load_blogs(ss)
     card_ws, known_links = setup_card_tab(ss)
-    seen = {canon_link(u) for u in known_links}
+    gate_ws, gate_seen = setup_gate_tab(ss)
+    seen = {canon_link(u) for u in known_links} | gate_seen
 
     today = datetime.now(KST).strftime("%Y-%m-%d")
     new_rows = []
-    n_rss_fail = n_gate_skip = n_skip = n_excl = n_gpt_fail = n_spec = 0
+    gate_rows = []      # 이번에 게이트에서 잘린 글(다음 실행부터 건너뛰도록 기록)
+    n_rss_fail = n_gate_skip = n_skip = n_excl = n_gpt_fail = n_spec = n_title_skip = 0
 
     print(f"감시 시작 — 블로그 {len(blogs)}개(비숙박 {len(BLOCKLIST)}개 제외), "
-          f"기존 {len(seen)}건 (모델 {MODEL}, 게이트 {GATE_BODY_CHARS}자 / 추출 {FULL_BODY_CHARS}자)")
+          f"기존 매물 {len(known_links)}건 + 게이트제외 {len(gate_seen)}건 "
+          f"(모델 {MODEL}, 게이트 {GATE_BODY_CHARS}자 / 추출 {FULL_BODY_CHARS}자)")
     for bid in blogs:
         try:
             feed = fetch_feed(bid)
@@ -452,6 +521,13 @@ def main():
 
             title = (entry.get("title") or "").strip()
             posted = post_datetime(entry)
+
+            # ── 0차 제목 사전필터: 명백한 비숙박은 본문 fetch·GPT 없이 컷(비용 0) ──
+            if title_prefilter_skip(title):
+                n_title_skip += 1
+                gate_rows.append([today, bid, link, title])
+                continue
+
             bid_, logno_ = parse_link(link)
             body = fetch_post_body(bid_, logno_) or entry_body(entry)  # 본문 우선, 실패 시 RSS 일부
             time.sleep(0.7)   # 본문 접속 간격 (차단 회피)
@@ -467,6 +543,7 @@ def main():
 
             if str(gate.get("매물여부", "")).strip() == "비매물":
                 n_gate_skip += 1
+                gate_rows.append([today, bid, link, title])   # 다음 실행부터 재판정 안 함
                 continue    # 여기서 끝 — 2차 호출 안 함(토큰 절약)
 
             # ── 2차 추출: 매물일 때만 전문(4000자)으로 전 항목 ────────────
@@ -480,10 +557,12 @@ def main():
 
             if str(info.get("매물여부", "")).strip() == "비매물":   # 2차에서 뒤집힌 경우
                 n_skip += 1
+                gate_rows.append([today, bid, link, title])   # 확정 비매물 → 재판정 안 함
                 continue
 
             if is_excluded_kind(info.get("종류", ""), title):   # 숙박 아니면 안 올림
                 n_excl += 1
+                gate_rows.append([today, bid, link, title])   # 거주형/비숙박 → 재판정 안 함
                 continue
 
             if any(info.get(k) for k in ("대지면적", "연면적", "층수", "준공연도")):
@@ -499,6 +578,20 @@ def main():
     if new_rows:
         card_ws.append_rows(new_rows, value_input_option="RAW")
 
+    # 게이트에서 잘린 글 기록 → 다음 실행부터 fetch·GPT 둘 다 건너뛴다
+    if gate_rows:
+        try:
+            gate_ws.append_rows(gate_rows, value_input_option="RAW")
+            print(f"게이트제외 기록: +{len(gate_rows)}건 (다음 실행부터 재판정 안 함)")
+        except Exception as e:
+            print(f"게이트제외 기록 실패(감시에는 영향 없음): {e}")
+    try:
+        n_pruned = prune_gate_tab(gate_ws)
+        if n_pruned:
+            print(f"게이트제외 오래된 기록 정리: -{n_pruned}건")
+    except Exception as e:
+        print(f"게이트제외 정리 실패(무시): {e}")
+
     # 매물카드 전체(과거분 포함) 중복그룹 갱신
     try:
         n_dup = recompute_dup_groups(card_ws)
@@ -508,8 +601,9 @@ def main():
 
     print("─" * 52)
     print(f"완료 — 새 매물 {len(new_rows)}건 추가 (그중 건물스펙 확보 {n_spec}건)")
-    print(f"       1차 게이트 컷 {n_gate_skip} · 2차 비매물 {n_skip} · "
-          f"거주형/비숙박 제외 {n_excl} · GPT실패 {n_gpt_fail} · RSS실패 {n_rss_fail}곳")
+    print(f"       0차 제목컷 {n_title_skip}(GPT 안 부름) · 1차 게이트 컷 {n_gate_skip} · "
+          f"2차 비매물 {n_skip} · 거주형/비숙박 제외 {n_excl} · "
+          f"GPT실패 {n_gpt_fail} · RSS실패 {n_rss_fail}곳")
     print("→ '건물스펙 확보' 건수를 보세요. 이게 0에 가까우면 광고 텍스트에 스펙이 없다는 뜻입니다.")
 
 
