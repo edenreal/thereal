@@ -115,14 +115,33 @@ def get_openai():
     return OpenAI(api_key=key)
 
 
+class QuotaExhausted(RuntimeError):
+    """OpenAI 크레딧/쿼터 소진. 재시도해도 소용없으니 즉시 중단시킨다."""
+
+
+def _is_quota_error(e):
+    """잔액 소진·쿼터 초과인지 판정(재시도 무의미한 종류)."""
+    msg = str(e).lower()
+    return any(k in msg for k in (
+        "insufficient_quota", "credit_balance_exhausted",
+        "no credits remaining", "exceeded your current quota",
+        "billing_hard_limit_reached",
+    ))
+
+
 def gpt_judge(oai, name, titles):
     content = JUDGE_PROMPT.format(name=name, titles="\n".join(f"- {t}" for t in titles))
-    resp = oai.chat.completions.create(
-        model=MODEL,
-        messages=[{"role": "user", "content": content}],
-        temperature=0,
-        response_format={"type": "json_object"},
-    )
+    try:
+        resp = oai.chat.completions.create(
+            model=MODEL,
+            messages=[{"role": "user", "content": content}],
+            temperature=0,
+            response_format={"type": "json_object"},
+        )
+    except Exception as e:
+        if _is_quota_error(e):
+            raise QuotaExhausted(e)
+        raise
     return json.loads(resp.choices[0].message.content)
 
 
@@ -240,14 +259,20 @@ def main():
 
     rows, auto = [], []
     n_yes = n_judgefail = 0
+    quota_err = None
     for b, c in survivors:
         try:
             j = gpt_judge(oai, c["name"], c["titles"])
             verdict = str(j.get("판정", "")).strip()
             reason = str(j.get("이유", "")).strip()
-        except Exception:
+        except QuotaExhausted as e:
+            # 후보 탭에 '판정실패'로 적으면 다음 발굴부터 제외돼 영영 재판정 안 됨 → 기록하지 않고 중단
+            quota_err = e
+            break
+        except Exception as e:
             verdict, reason = "확인필요", "GPT판정실패"
             n_judgefail += 1
+            print(f"  [GPT판정실패] {b}: {e}")
 
         if verdict == "숙박":
             auto.append(b)
@@ -268,6 +293,17 @@ def main():
     print(f"완료 — 새 후보 {len(rows)}개 · GPT '숙박' {n_yes}개 자동편입 · "
           f"판정실패 {n_judgefail} · 수동승인 {len(promoted)}")
     print("→ 비숙박이 잘못 편입된 게 보이면, 감시기와 발굴기의 BLOCKLIST에 그 블로그ID만 추가하세요.")
+
+    # ── 조용한 실패 방지: 비정상이면 워크플로우를 '실패'로 떨어뜨린다 ──
+    if quota_err:
+        print("!" * 52)
+        print(f"중단 — OpenAI 크레딧/쿼터 소진: {quota_err}")
+        print("   판정 못 한 후보는 기록하지 않았으니, 충전 후 다음 실행에서 다시 발굴·판정됩니다.")
+        raise SystemExit(1)
+    if len(survivors) >= 5 and n_judgefail / len(survivors) >= 0.5:
+        print("!" * 52)
+        print(f"경고 — GPT 판정 {len(survivors)}건 중 {n_judgefail}건 실패(50% 이상). 위 [GPT판정실패] 로그를 보세요.")
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

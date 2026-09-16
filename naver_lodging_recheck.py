@@ -116,6 +116,20 @@ def get_openai():
     return OpenAI(api_key=key)
 
 
+class QuotaExhausted(RuntimeError):
+    """OpenAI 크레딧/쿼터 소진. 재시도해도 소용없으니 즉시 중단시킨다."""
+
+
+def _is_quota_error(e):
+    """잔액 소진·쿼터 초과인지 판정(재시도 무의미한 종류)."""
+    msg = str(e).lower()
+    return any(k in msg for k in (
+        "insufficient_quota", "credit_balance_exhausted",
+        "no credits remaining", "exceeded your current quota",
+        "billing_hard_limit_reached",
+    ))
+
+
 def gpt_extract(oai, title, body):
     content = EXTRACT_PROMPT.format(title=title, body=(body or "")[:FULL_BODY_CHARS])
     last_err = None
@@ -129,6 +143,8 @@ def gpt_extract(oai, title, body):
             )
             return json.loads(resp.choices[0].message.content)
         except Exception as e:
+            if _is_quota_error(e):
+                raise QuotaExhausted(e)
             last_err = e
             if attempt < GPT_RETRIES - 1:
                 time.sleep(2 ** attempt)
@@ -209,6 +225,8 @@ def main():
 
     updates = []
     n_rescued = n_spec = n_nonprop = n_excl = n_nobody = n_fail = 0
+    n_tried = 0
+    quota_err = None
 
     def flush():
         nonlocal updates
@@ -226,10 +244,15 @@ def main():
             n_nobody += 1
             continue                    # 본문 못 가져옴 — 상태 유지(다음 실행에 재시도)
 
+        n_tried += 1
         try:
             info = gpt_extract(oai, title, body)
-        except Exception:
+        except QuotaExhausted as e:
+            quota_err = e      # 지금까지 처리분은 아래 flush로 저장, 나머지는 상태 유지
+            break
+        except Exception as e:
             n_fail += 1
+            print(f"  [GPT실패] 행{r} {link}: {e}")
             continue   # 상태 유지(다음 실행에 재시도)
 
         new_row = (list(row) + [""] * len(header))[:len(header)]   # 헤더 칸수로 패딩
@@ -262,6 +285,17 @@ def main():
     print(f"       비매물(재처리) {n_nonprop} · 거주형/비숙박 {n_excl} · "
           f"본문없음 {n_nobody} · GPT실패 {n_fail}")
     print("→ 본문없음·GPT실패는 상태가 유지되니, 다시 실행하면 그 행만 이어서 재시도합니다.")
+
+    # ── 조용한 실패 방지: 비정상이면 워크플로우를 '실패'로 떨어뜨린다 ──
+    if quota_err:
+        print("!" * 52)
+        print(f"중단 — OpenAI 크레딧/쿼터 소진: {quota_err}")
+        print("   처리분은 저장됐고 나머지는 상태 유지 — 충전 후 다시 실행하면 이어집니다.")
+        raise SystemExit(1)
+    if n_tried >= 5 and n_fail / n_tried >= 0.5:
+        print("!" * 52)
+        print(f"경고 — GPT 호출 {n_tried}건 중 {n_fail}건 실패(50% 이상). 위 [GPT실패] 로그를 보세요.")
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":
