@@ -203,8 +203,23 @@ def get_openai():
     return OpenAI(api_key=key)
 
 
+class QuotaExhausted(RuntimeError):
+    """OpenAI 크레딧/쿼터 소진. 재시도해도 소용없으니 즉시 중단시킨다."""
+
+
+def _is_quota_error(e):
+    """잔액 소진·쿼터 초과인지 판정(재시도 무의미한 종류)."""
+    msg = str(e).lower()
+    return any(k in msg for k in (
+        "insufficient_quota", "credit_balance_exhausted",
+        "no credits remaining", "exceeded your current quota",
+        "billing_hard_limit_reached",
+    ))
+
+
 def _chat_json(oai, content):
-    """공통 호출부. rate limit/timeout이면 1→2→4초 백오프 후 재시도."""
+    """공통 호출부. rate limit/timeout이면 1→2→4초 백오프 후 재시도.
+    단 잔액 소진이면 재시도 없이 QuotaExhausted로 즉시 올린다."""
     last_err = None
     for attempt in range(GPT_RETRIES):
         try:
@@ -216,6 +231,8 @@ def _chat_json(oai, content):
             )
             return json.loads(resp.choices[0].message.content)
         except Exception as e:
+            if _is_quota_error(e):
+                raise QuotaExhausted(e)
             last_err = e
             if attempt < GPT_RETRIES - 1:
                 time.sleep(2 ** attempt)
@@ -497,6 +514,8 @@ def main():
     new_rows = []
     gate_rows = []      # 이번에 게이트에서 잘린 글(다음 실행부터 건너뛰도록 기록)
     n_rss_fail = n_gate_skip = n_skip = n_excl = n_gpt_fail = n_spec = n_title_skip = 0
+    n_tried = 0          # GPT를 실제로 부른 글 수(실패율 계산용)
+    quota_err = None     # 크레딧 소진 시 여기에 담고 즉시 중단
 
     print(f"감시 시작 — 블로그 {len(blogs)}개(비숙박 {len(BLOCKLIST)}개 제외), "
           f"기존 매물 {len(known_links)}건 + 게이트제외 {len(gate_seen)}건 "
@@ -533,10 +552,15 @@ def main():
             time.sleep(0.7)   # 본문 접속 간격 (차단 회피)
 
             # ── 1차 게이트: 매물이냐 아니냐 (앞 700자) ─────────────────────
+            n_tried += 1
             try:
                 gate = gpt_gate(oai, title, body)
-            except Exception:
+            except QuotaExhausted as e:
+                quota_err = e
+                break
+            except Exception as e:
                 n_gpt_fail += 1
+                print(f"  [GPT실패/게이트] {link}: {e}")
                 new_rows.append(build_row(today, posted, bid, {}, title, link, "확인필요(GPT실패)"))
                 added += 1
                 continue
@@ -549,8 +573,12 @@ def main():
             # ── 2차 추출: 매물일 때만 전문(4000자)으로 전 항목 ────────────
             try:
                 info = gpt_extract(oai, title, body)
-            except Exception:
+            except QuotaExhausted as e:
+                quota_err = e
+                break
+            except Exception as e:
                 n_gpt_fail += 1
+                print(f"  [GPT실패/추출] {link}: {e}")
                 new_rows.append(build_row(today, posted, bid, {}, title, link, "확인필요(GPT실패)"))
                 added += 1
                 continue
@@ -573,6 +601,8 @@ def main():
 
         if added:
             print(f"  {bid}: +{added}")
+        if quota_err:
+            break
         time.sleep(SLEEP_SEC)
 
     if new_rows:
@@ -605,6 +635,18 @@ def main():
           f"2차 비매물 {n_skip} · 거주형/비숙박 제외 {n_excl} · "
           f"GPT실패 {n_gpt_fail} · RSS실패 {n_rss_fail}곳")
     print("→ '건물스펙 확보' 건수를 보세요. 이게 0에 가까우면 광고 텍스트에 스펙이 없다는 뜻입니다.")
+
+    # ── 조용한 실패 방지: 비정상이면 워크플로우를 '실패'로 떨어뜨린다 ──
+    if quota_err:
+        print("!" * 52)
+        print(f"중단 — OpenAI 크레딧/쿼터 소진: {quota_err}")
+        print("   platform.openai.com/settings/organization/billing 에서 충전·자동충전을 확인하세요.")
+        print("   남은 글은 건드리지 않았으니, 충전 후 다음 실행에서 그대로 이어집니다.")
+        raise SystemExit(1)
+    if n_tried >= 5 and n_gpt_fail / n_tried >= 0.5:
+        print("!" * 52)
+        print(f"경고 — GPT 호출 {n_tried}건 중 {n_gpt_fail}건 실패(50% 이상). 위 [GPT실패] 로그를 보세요.")
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":
