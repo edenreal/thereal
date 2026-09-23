@@ -178,6 +178,21 @@ def existing_candidates(cand_ws):
     return {v.strip() for v in raw if v.strip()}
 
 
+def purge_judge_failed(cand_ws):
+    """후보 탭의 'GPT판정실패' 행을 지운다 → 다음 발굴에서 다시 판정받게.
+    (판정 못 받은 블로그가 후보 탭에 남으면 '이미 후보'로 영구 제외되기 때문)"""
+    vals = cand_ws.get_all_values()
+    if len(vals) < 2 or "GPT이유" not in vals[0] or "블로그ID" not in vals[0]:
+        return []
+    ri, bi = vals[0].index("GPT이유"), vals[0].index("블로그ID")
+    hits = [(i, row[bi] if len(row) > bi else "") for i, row in enumerate(vals[1:], start=2)
+            if len(row) > ri and row[ri].strip() == "GPT판정실패"]
+    for i, _ in reversed(hits):          # 아래 행부터 지워야 번호가 안 밀림
+        cand_ws.delete_rows(i)
+        time.sleep(0.5)
+    return [b for _, b in hits]
+
+
 def promote_approved(cand_ws, blog_ws, blog_ids):
     """블로그후보에서 승인(O)된 행을 블로그목록으로 옮긴다(수동 보강용).
     자동편입과 별개로, 사람이 직접 O를 친 것도 계속 처리한다."""
@@ -220,6 +235,11 @@ def main():
 
     blog_ids, blog_ws = current_blog_ids(ss)
     cand_ws = get_or_create(ss, CAND_TAB, CAND_HEADER)
+
+    # 0) 판정 실패로 갇힌 후보 풀어주기(이번 발굴에서 재판정)
+    freed = purge_judge_failed(cand_ws)
+    if freed:
+        print(f"GPT판정실패 후보 {len(freed)}개 삭제 → 이번에 재판정: {freed}")
 
     # 1) 사람이 직접 O 친 후보도 편입(수동 보강)
     promoted = promote_approved(cand_ws, blog_ws, blog_ids)
@@ -270,9 +290,10 @@ def main():
             quota_err = e
             break
         except Exception as e:
-            verdict, reason = "확인필요", "GPT판정실패"
+            # 후보 탭에 적지 않는다 → 다음 발굴에서 다시 판정
             n_judgefail += 1
             print(f"  [GPT판정실패] {b}: {e}")
+            continue
 
         if verdict == "숙박":
             auto.append(b)
