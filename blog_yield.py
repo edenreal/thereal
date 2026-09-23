@@ -19,7 +19,7 @@ CARD_TAB = "매물카드"
 BLOG_TAB = "블로그목록"
 
 BLOCKLIST = {
-    "stewzinnia59", "ksanchoi", "auctionrun3988", "sbjjjang", "kj-4848", "jijonbpbp",
+    "stewzinnia59", "ksanchoi", "auctionrun3988", "sbjjjang", "jijonbpbp",
     "kkanglive", "moneyschool300",
     "h3h2003", "foremanenc", "sanergy_3051", "kymin0909",
     # 2026-09-23 추가 — 최근 30일 숙박매물 0건·잡글 5건+(자동편입분만, 사람 승인분 제외) + 회원권·달방/출장숙소

@@ -41,6 +41,7 @@ SEARCH_URL = "https://openapi.naver.com/v1/search/blog.json"
 SEARCH_KEYWORDS = [
     "모텔 매매", "모텔 임대", "호텔 매매", "호텔 임대",
     "호스텔 매매", "고시원 매매", "숙박시설 매매", "숙박시설 임대",
+    "고시원 양도양수", "고시텔 매매", "고시원 임대",
     "모텔 매물", "여관 매매",
 ]
 DISPLAY = 100      # 키워드당 가져올 검색 결과 수 (최대 100)
@@ -50,7 +51,7 @@ APPROVE_MARKS = {"O", "Y", "ㅇ", "승인", "예"}
 
 # 비숙박 전문 블로그 — 후보로도 올리지 않는다(감시기 BLOCKLIST와 동일하게 유지).
 BLOCKLIST = {
-    "stewzinnia59", "ksanchoi", "auctionrun3988", "sbjjjang", "kj-4848", "jijonbpbp",
+    "stewzinnia59", "ksanchoi", "auctionrun3988", "sbjjjang", "jijonbpbp",
     "kkanglive", "moneyschool300",
     # 2026-07-31 추가 — 숙박매물 0건·전량 비숙박(코인/주식/맛집/공장 등)
     "h3h2003", "foremanenc", "sanergy_3051", "kymin0909",
@@ -98,6 +99,7 @@ JUDGE_PROMPT = """다음은 네이버 블로그의 이름과 최근 글 제목 �
 
 "숙박"으로 판정:
 - 모텔·호텔·호스텔·여관·펜션·게스트하우스 등의 매매·임대 매물을 실제로 올리는 공인중개사·중개 블로그.
+- 고시원·고시텔 영업장 매매·임대·양도양수 매물을 올리는 블로그(방 한 칸 입주자 모집만 하는 곳은 비숙박).
 
 "비숙박"으로 판정 (아래는 전부 비숙박):
 - 인테리어·시공·리모델링 업체, 대출·금융, 청소·방역
