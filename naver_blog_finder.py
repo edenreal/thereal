@@ -187,9 +187,11 @@ def purge_judge_failed(cand_ws):
     ri, bi = vals[0].index("GPT이유"), vals[0].index("블로그ID")
     hits = [(i, row[bi] if len(row) > bi else "") for i, row in enumerate(vals[1:], start=2)
             if len(row) > ri and row[ri].strip() == "GPT판정실패"]
-    for i, _ in reversed(hits):          # 아래 행부터 지워야 번호가 안 밀림
-        cand_ws.delete_rows(i)
-        time.sleep(0.5)
+    if hits:   # 요청 1번으로 일괄 삭제(행마다 호출하면 쓰기 한도 429). 아래 행부터라 번호 안 밀림
+        cand_ws.spreadsheet.batch_update({"requests": [
+            {"deleteDimension": {"range": {"sheetId": cand_ws.id, "dimension": "ROWS",
+                                           "startIndex": i - 1, "endIndex": i}}}
+            for i, _ in reversed(hits)]})
     return [b for _, b in hits]
 
 
