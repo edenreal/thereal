@@ -61,6 +61,7 @@ BLOCKLIST = {
     "bs_gangseo", "kimvision80", "jeju5may", "zumj9bivy0if4tk", "alsthd7",
     "b9o8bfq5qsxk6", "therichpark0711", "27sjlee", "jayan_hanviet", "gunwoo_kwon6792",
     "nirana22", "codhksgml", "5304356",
+    "omoidemichi",   # 호텔원 자사 블로그 — 자사 광고가 경쟁 광고로 잡히지 않게
 }
 
 # 감시기(naver_lodging_monitor.py)와 동일한 종류 화이트리스트.
