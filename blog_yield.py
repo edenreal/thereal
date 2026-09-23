@@ -22,6 +22,14 @@ BLOCKLIST = {
     "stewzinnia59", "ksanchoi", "auctionrun3988", "sbjjjang", "kj-4848", "jijonbpbp",
     "kkanglive", "moneyschool300",
     "h3h2003", "foremanenc", "sanergy_3051", "kymin0909",
+    # 2026-09-23 추가 — 최근 30일 숙박매물 0건·잡글 5건+(자동편입분만, 사람 승인분 제외) + 회원권·달방/출장숙소
+    "jps2781", "realtymasta", "nosunyee", "helloyedol", "banktown2727",
+    "solacom7777", "rio8245", "gamemanian", "donghaduil", "qpmintae",
+    "ksr1972", "ssy8422", "snowstorm85", "newaceno1", "ddabbs",
+    "roomhub", "johnpong22", "newbongbong", "kimshuly", "jigollaid",
+    "bs_gangseo", "kimvision80", "jeju5may", "zumj9bivy0if4tk", "alsthd7",
+    "b9o8bfq5qsxk6", "therichpark0711", "27sjlee", "jayan_hanviet", "gunwoo_kwon6792",
+    "nirana22", "codhksgml", "5304356",
 }
 
 
