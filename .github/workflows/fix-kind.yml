@@ -1,0 +1,23 @@
+name: 종류 고시원 오표기 정정 (1회용, 수동)
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'preview / apply'
+        required: true
+        default: 'preview'
+        type: choice
+        options: [preview, apply]
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install gspread google-auth
+      - env:
+          GCP_CREDENTIALS_JSON: ${{ secrets.GCP_CREDENTIALS_JSON }}
+          FIX_MODE: ${{ github.event.inputs.mode }}
+        run: python fix_kind.py
